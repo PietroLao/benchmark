@@ -1,0 +1,12 @@
+# Ambiente virtuale
+.venv/
+
+# Bytecode Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+
+# Artefatti LaTeX vaganti
+texput.log
