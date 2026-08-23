@@ -27,7 +27,15 @@ protocollo. Tre presidi:
    coincidono byte per byte.
 2. **`shared/operations.py`** e' l'unica implementazione delle chiamate
    REST. I bracci cambiano come lo strumento e' *esposto*, mai cosa *fa*.
-3. **Diff dei body HTTP** inviati a `/v1/chat/completions` nei due
+3. **`shared/tasks.py`** definisce il prompt di sistema e i compiti, di
+   nuovo una sola volta. Nulla in MCP impone un certo prompt e nulla in
+   LangChain lo vieta: e' una scelta dello sviluppatore, non una
+   proprieta' dei due approcci, e lasciarla divergere metterebbe nei
+   conteggi di iterazioni una differenza arbitraria indistinguibile da un
+   effetto del protocollo. Verificato: senza `system_prompt` esplicito
+   `create_agent` invia al modello il solo messaggio dell'utente, quindi
+   il framework non ne aggiunge di suo.
+4. **Diff dei body HTTP** inviati a `/v1/chat/completions` nei due
    bracci: se `tools` e `messages` coincidono, il modello riceve lo
    stesso input.
 
@@ -60,12 +68,15 @@ uv run python -m harness.schema_gate
 ```
 shared/tools_spec.py     definizione unica degli strumenti
 shared/operations.py     unica implementazione delle chiamate REST
+shared/tasks.py          prompt di sistema condiviso e cinque compiti
 server/wrapper.py        avvolge l'Event Manager: conteggio REST + reset
 server/fixture.py        dataset deterministico e leggibile
 arm_mcp/server.py        server MCP (API di basso livello, schemi espliciti)
 arm_mcp/http_server.py   lo stesso server su trasporto Streamable HTTP
 arm_langchain/tools.py   strumenti LangChain derivati da tools_spec
 harness/smoke_nim.py     fase 0: verifica del tool calling su NIM
+harness/trace.py         registrazione integrale delle esecuzioni
+harness/schema_gate.py   fase 4: parita' degli schemi fra i due bracci
 microbench/transport.py  esperimento A: overhead di trasporto, senza LLM
 results/                 un JSON per esecuzione
 ```
@@ -106,7 +117,7 @@ BENCH_EXPOSE_ECHO=1 uv run uvicorn arm_mcp.http_server:app --port 8100
 Eseguire l'esperimento A:
 
 ```bash
-uv run python -m microbench.transport --iterations 100 --warmup 20
+uv run python -m microbench.transport --repetitions 100 --warmup 20
 ```
 
 Eseguire la fase 0 (richiede la chiave, mai scritta su file):
@@ -120,10 +131,28 @@ uv run python -m harness.smoke_nim
 **Alternanza delle condizioni e riscaldamento.** Le misure girano su un
 portatile senza ventola. Le condizioni sono alternate a rotazione anziche'
 eseguite in blocco, cosi' che l'eventuale deriva termica colpisca tutte le
-condizioni allo stesso modo; le prime iterazioni sono scartate.
+condizioni allo stesso modo; le prime ripetizioni sono scartate.
 
 **Statistiche robuste.** Mediana e IQR, non media e deviazione standard:
 la distribuzione delle latenze e' asimmetrica e con code lunghe.
+
+**Ripetizioni, non iterazioni.** Nel microbenchmark il parametro
+`--repetitions` indica quante volte la stessa misura viene ripetuta. Il
+termine *iterazione* e' riservato al **numero di interrogazioni al
+modello** entro una singola esecuzione agentica, che e' una delle metriche
+della tesi: usare la stessa parola per due grandezze diverse ha gia'
+generato confusione in sede di revisione.
+
+**Tracce integrali.** Ogni esecuzione agentica scrive in `results/traces/`
+un JSON con i payload inviati al modello, le risposte per intero, gli
+argomenti e i risultati di ogni strumento, i tempi e i conteggi. Si
+registra anche cio' che al momento non serve: interrogare il modello costa
+minuti, quindi una metrica definita dopo l'esecuzione — token, caratteri
+scambiati, ripetizioni di uno stesso strumento — deve essere ricalcolabile
+leggendo i file invece di rieseguire. Il nome del file contiene braccio,
+modello, compito, istante e identificativo: nessuna esecuzione puo'
+sovrascriverne un'altra. Le intestazioni HTTP non sono mai registrate,
+perche' conterrebbero la chiave API.
 
 **Alternanza dei bracci nella campagna (fase 6).** Due esecuzioni
 identiche della fase 0 hanno dato 18–164 s con un ritentativo 503 e
@@ -187,14 +216,14 @@ componente REST; `list_events` serve a collocarlo in un contesto
 realistico e a controllare la coerenza interna (vedi sotto).
 
 **L'ordine delle condizioni era una distorsione sistematica, ora
-corretta.** Con un ordine fisso, la prima condizione di ogni iterazione
+corretta.** Con un ordine fisso, la prima condizione di ogni ripetizione
 veniva eseguita sempre subito dopo quelle che avviano processi e chiudono
 connessioni, pagandone ogni volta gli strascichi. Il sintomo era che
 `langchain_tool` risultava *piu' veloce* della chiamata diretta su
 `list_events` (-0.108 ms), il che e' impossibile. Isolando le due
 condizioni il segno si inverte e l'overhead diventa +0.141 ms, coerente
 con i +0.148 ms misurati su `echo`. Le condizioni sono ora permutate a
-caso a ogni iterazione, con seme fisso per riproducibilita'.
+caso a ogni ripetizione, con seme fisso per riproducibilita'.
 
 E' il motivo per cui la tabella qui sotto va letta come misura valida: i
 valori assoluti restano piu' alti che in isolamento, perche' le
@@ -203,7 +232,7 @@ cade piu' sempre sulla stessa cella.
 
 ## Cosa mostra l'esperimento A
 
-Tre esecuzioni con ordine permutato: una da 40 iterazioni e **due
+Tre esecuzioni con ordine permutato: una da 40 ripetizioni e **due
 repliche indipendenti da 100** (semi 1001 e 2002), eseguite per
 verificare che le cifre rivendicate non fossero un artefatto di sessione.
 Mediane sull'operazione `echo`, che esclude la rete:

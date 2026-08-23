@@ -43,6 +43,7 @@ from typing import Any
 
 import httpx
 
+from harness.trace import RunTrace
 from shared.tools_spec import openai_tools_format
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
@@ -50,6 +51,17 @@ RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 BASE_URL = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
 MODEL = os.environ.get("NIM_MODEL", "meta/llama-3.3-70b-instruct")
 API_KEY = os.environ.get("NVIDIA_API_KEY", "")
+
+#: Traccia integrale dell'esecuzione. La fase 0 non è un esperimento, ma
+#: registrarla serve comunque a due cose: verificare che l'endpoint
+#: riporti il conteggio dei token in ``usage``, e collaudare il formato
+#: delle tracce prima che lo usino i cicli agentici veri.
+trace = RunTrace(
+    arm="smoke",
+    model=MODEL,
+    task_id="fase0",
+    prompt="(tre verifiche indipendenti sul tool calling)",
+)
 
 OK = "✓"
 KO = "✗"
@@ -100,6 +112,7 @@ def _post(payload: dict[str, Any]) -> tuple[httpx.Response, float]:
         last = response
         delay = min(2**attempt, 30)
         retries_observed.append((response.status_code, delay))
+        trace.event("retry", status_code=response.status_code, backoff_s=delay)
         print(
             f"  ~ HTTP {response.status_code}, ritento fra {delay}s "
             f"(tentativo {attempt + 2}/{MAX_ATTEMPTS})"
@@ -140,8 +153,13 @@ def chat(messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None) -> 
             payload["temperature"] = TEMPERATURE
             response, elapsed = _post(payload)
 
-    response.raise_for_status()
-    return response.json(), elapsed
+    if response.status_code >= 400:
+        trace.llm_call(payload, None, elapsed, error=f"HTTP {response.status_code}")
+        response.raise_for_status()
+
+    body = response.json()
+    trace.llm_call(payload, body, elapsed)
+    return body, elapsed
 
 
 def main() -> int:
@@ -321,6 +339,24 @@ def _persist(
     out_path = RESULTS_DIR / f"smoke_{timestamp}.json"
     out_path.write_text(json.dumps(record, indent=2, ensure_ascii=False))
     print(f"Esito salvato in {out_path.relative_to(RESULTS_DIR.parent)}")
+
+    trace.finish(status="ok" if not failures else "fallita")
+    trace_path = trace.save()
+    print(f"Traccia integrale in  {trace_path.relative_to(RESULTS_DIR.parent)}")
+
+    # Risponde a una domanda rimasta aperta: l'endpoint riporta il
+    # conteggio dei token, oppure vanno stimati a posteriori dai testi?
+    m = trace.metrics()
+    if m["tokens_reported_by_endpoint"]:
+        print(
+            f"Token riportati dall'endpoint: {m['prompt_tokens']} in ingresso, "
+            f"{m['completion_tokens']} in uscita."
+        )
+    else:
+        print(
+            "L'endpoint NON riporta i token: andranno stimati dai testi salvati "
+            f"({m['chars_sent']} caratteri inviati, {m['chars_received']} ricevuti)."
+        )
 
 
 if __name__ == "__main__":

@@ -54,7 +54,7 @@ portatile senza ventola:
 * le condizioni sono alternate a rotazione anziche' eseguite in blocco,
   cosi' che l'eventuale deriva termica colpisca tutte le condizioni allo
   stesso modo invece di penalizzare l'ultima;
-* le prime iterazioni sono scartate come riscaldamento, perche' import,
+* le prime ripetizioni sono scartate come riscaldamento, perche' import,
   cache e apertura delle connessioni inquinano le prime misure.
 
 Uso::
@@ -62,7 +62,7 @@ Uso::
     # opzionale, per le condizioni HTTP:
     BENCH_EXPOSE_ECHO=1 uv run uvicorn arm_mcp.http_server:app --port 8100
 
-    uv run python -m microbench.transport --iterations 100 --warmup 20
+    uv run python -m microbench.transport --repetitions 100 --warmup 20
 """
 
 from __future__ import annotations
@@ -114,6 +114,20 @@ _ECHO_SCHEMA = {
 }
 
 Caller = Callable[[str, dict[str, Any]], Awaitable[Any]]
+
+#: Ruolo di ciascuna condizione nel confronto. Serve a rendere leggibile
+#: l'esito: dei sei percorsi misurati solo due sono i bracci sperimentali,
+#: uno e' il riferimento inferiore e tre sono varianti di configurazione
+#: di MCP che esistono per scomporne il costo. Senza questa colonna la
+#: tabella non lascia capire quali righe siano il confronto vero.
+ROLES: dict[str, str] = {
+    "diretto": "riferimento",
+    "langchain_tool": "BRACCIO LangChain",
+    "mcp_stdio_persistent": "BRACCIO MCP",
+    "mcp_http_persistent": "variante MCP",
+    "mcp_http_new_session": "variante MCP",
+    "mcp_stdio_new_process": "variante MCP",
+}
 
 
 def _server_params() -> StdioServerParameters:
@@ -207,14 +221,14 @@ async def _http_available() -> bool:
 
 
 async def run(
-    iterations: int,
+    repetitions: int,
     warmup: int,
     wanted: list[str] | None = None,
     seed: int = 20260803,
 ) -> tuple[dict[str, list[float]], list[str]]:
     """Esegue il microbenchmark e restituisce i campioni grezzi.
 
-    L'ordine delle condizioni entro ciascuna iterazione e' permutato a
+    L'ordine delle condizioni entro ciascuna ripetizione e' permutato a
     caso. Con un ordine fisso, la condizione misurata per prima verrebbe
     eseguita **sempre** subito dopo quelle piu' pesanti — che avviano
     processi e chiudono connessioni — e ne pagherebbe sistematicamente gli
@@ -264,7 +278,7 @@ async def run(
 
         rng = random.Random(seed)
         order = list(conditions)
-        total = warmup + iterations
+        total = warmup + repetitions
         for i in range(total):
             measuring = i >= warmup
             # Rotazione: a ogni giro si attraversano tutte le celle, cosi'
@@ -278,7 +292,7 @@ async def run(
                     if measuring:
                         samples[f"{cond}::{op_label}"].append(elapsed_ms)
             if measuring and (i - warmup + 1) % 10 == 0:
-                print(f"  {i - warmup + 1}/{iterations} iterazioni", file=sys.stderr)
+                print(f"  {i - warmup + 1}/{repetitions} ripetizioni", file=sys.stderr)
 
         return samples, conditions
 
@@ -312,13 +326,16 @@ def report(samples: dict[str, list[float]], conditions: list[str]) -> dict[str, 
     """Stampa il riepilogo e calcola gli overhead rilevanti."""
     summary = {key: summarize(vals) for key, vals in samples.items()}
 
-    print(f"\n{'condizione':<24} {'operazione':<14} {'mediana':>10} {'IQR':>10} {'p95':>10}")
-    print("-" * 72)
+    print(
+        f"\n{'condizione':<24} {'ruolo':<19} {'operazione':<13} "
+        f"{'mediana':>10} {'IQR':>10} {'p95':>10}"
+    )
+    print("-" * 92)
     for op_label in OPERATIONS:
         for cond in conditions:
             s = summary[f"{cond}::{op_label}"]
             print(
-                f"{cond:<24} {op_label:<14} "
+                f"{cond:<24} {ROLES.get(cond, ''):<19} {op_label:<13} "
                 f"{s['median_ms']:>9.3f}ms {s['iqr_ms']:>9.3f}ms {s['p95_ms']:>9.3f}ms"
             )
 
@@ -367,7 +384,7 @@ def report(samples: dict[str, list[float]], conditions: list[str]) -> dict[str, 
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--iterations", type=int, default=100)
+    parser.add_argument("--repetitions", type=int, default=100)
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=20260803)
@@ -385,13 +402,13 @@ async def main() -> None:
     wanted = parsed.conditions.split(",") if parsed.conditions else None
 
     print(
-        f"Microbenchmark: {parsed.iterations} iterazioni misurate "
+        f"Microbenchmark: {parsed.repetitions} ripetizioni misurate "
         f"(+{parsed.warmup} di riscaldamento) su {len(OPERATIONS)} operazioni",
         file=sys.stderr,
     )
 
     samples, conditions = await run(
-        parsed.iterations, parsed.warmup, wanted, parsed.seed
+        parsed.repetitions, parsed.warmup, wanted, parsed.seed
     )
     analysis = report(samples, conditions)
 
@@ -403,7 +420,8 @@ async def main() -> None:
             {
                 "experiment": "A_transport",
                 "timestamp_utc": timestamp,
-                "iterations": parsed.iterations,
+                "repetitions": parsed.repetitions,
+                "roles": ROLES,
                 "warmup": parsed.warmup,
                 "conditions": conditions,
                 "python": sys.version,
