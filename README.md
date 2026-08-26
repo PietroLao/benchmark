@@ -44,10 +44,21 @@ schemi vengono raccolti da un vero `tools/list` su un server MCP in
 esecuzione, quindi dopo serializzazione JSON-RPC, trasmissione e
 deserializzazione — non confrontando definizioni in memoria, che
 sarebbero identiche per costruzione. Resta da verificare `messages`, che
-dipende dai loop agentici e quindi dalle fasi 2 e 3.
+dipende dai loop agentici.
+
+`harness/messages_gate.py` verifica `messages`, confrontando due tracce
+reali dello stesso compito. Il confronto non e' letterale: identificativi
+di chiamata generati a caso, `content: null` contro campo assente e campi
+in piu' nella ricostruzione LangChain sono differenze prive di
+significato semantico, e vengono normalizzate. Resta come prova
+indipendente il **conteggio dei token in ingresso** riportato
+dall'endpoint, che non dipende dal nostro codice di registrazione: se
+coincide, il modello ha ricevuto lo stesso input. Verificato su
+`t1_conteggio`: 1173 e 1735 token, identici in entrambe le interrogazioni.
 
 ```bash
 uv run python -m harness.schema_gate
+uv run python -m harness.messages_gate --task t1_conteggio
 ```
 
 ## Stato
@@ -56,11 +67,11 @@ uv run python -m harness.schema_gate
 |---|---|---|
 | 0 | Smoke test tool calling su NIM | **superata** |
 | 1 | Server strumentato, fixture, esperimento A | **completata** |
-| 2 | Host MCP standalone con LLM | da fare |
-| 3 | Braccio LangChain | da fare |
-| 4 | Diff degli schemi (gate) | **verde** sugli schemi; `messages` da fare |
+| 2 | Host MCP standalone con LLM | **implementata**, da eseguire |
+| 3 | Braccio LangChain | **implementata**, da eseguire |
+| 4 | Parita' dell'input (gate) | **verde** su `tools` e su `messages` |
 | 5 | Caratterizzazione rumore `t_llm` | da fare |
-| 6 | Campagna completa | da fare |
+| 6 | Campagna completa | **implementata**, da eseguire |
 | 7 | Analisi e tabelle LaTeX | da fare |
 
 ## Struttura
@@ -73,10 +84,16 @@ server/wrapper.py        avvolge l'Event Manager: conteggio REST + reset
 server/fixture.py        dataset deterministico e leggibile
 arm_mcp/server.py        server MCP (API di basso livello, schemi espliciti)
 arm_mcp/http_server.py   lo stesso server su trasporto Streamable HTTP
+arm_mcp/host.py          fase 2: host agentico autonomo (niente framework)
 arm_langchain/tools.py   strumenti LangChain derivati da tools_spec
+arm_langchain/agent.py   fase 3: agente ReAct + cattura della traccia
+shared/nim.py            client per l'endpoint, usato dal solo host MCP
+shared/env.py            caricamento di .env (chiave API)
 harness/smoke_nim.py     fase 0: verifica del tool calling su NIM
 harness/trace.py         registrazione integrale delle esecuzioni
-harness/schema_gate.py   fase 4: parita' degli schemi fra i due bracci
+harness/schema_gate.py   fase 4a: parita' degli schemi (tools)
+harness/messages_gate.py fase 4b: parita' della conversazione (messages)
+harness/campaign.py      fase 6: campagna, bracci alternati e riprendibile
 microbench/transport.py  esperimento A: overhead di trasporto, senza LLM
 results/                 un JSON per esecuzione
 ```
@@ -89,7 +106,25 @@ Percorso configurabile con `EVENT_MANAGER_ROOT` (default:
 
 ```bash
 uv sync
+cp .env.example .env      # poi inserire la propria chiave NVIDIA
 ```
+
+La chiave sta in `.env`, che **non e' versionato**: `.gitignore` lo
+esclude, e nel repository compare solo il modello `.env.example` con i
+soli nomi delle variabili. Una variabile esportata a mano nel terminale
+ha comunque la precedenza sul file, cosi' si puo' eseguire una campagna
+con una chiave o un modello diversi senza modificarlo. La chiave non
+compare mai nelle tracce salvate, perche' viaggia nelle intestazioni
+HTTP, che non vengono registrate.
+
+Il comando installa entrambi i bracci. LangChain non e' una dipendenza
+opzionale: l'esperimento A misura una condizione LangChain e il gate
+sugli schemi confronta i due bracci fra loro, quindi entrambi la
+importano. Le versioni esatte sono fissate in `uv.lock`, che va tenuto
+sotto controllo di versione: i risultati misurati dipendono da esse — i
+437 ms di import dell'SDK MCP e la quota di introspezione nel percorso
+LangChain sono proprieta' di versioni precise, e senza il lock non
+sarebbero riproducibili.
 
 ## Uso
 
@@ -106,9 +141,12 @@ curl -X POST http://127.0.0.1:8000/__bench__/reset
 curl http://127.0.0.1:8000/__bench__/counters/<run_id>
 ```
 
-Avviare il server MCP su HTTP (necessario per le condizioni HTTP
-dell'esperimento A; senza, quelle condizioni vengono saltate con un
-avviso invece di far fallire l'esecuzione):
+Avviare il server MCP su HTTP. La variabile `BENCH_EXPOSE_ECHO` serve
+alle condizioni HTTP dell'esperimento A e puo' restare impostata per
+tutto: sia il gate sia l'host agentico scartano gli strumenti interni,
+quindi il modello non li vede in nessun caso. Senza il server, le
+condizioni HTTP del microbenchmark vengono saltate con un avviso invece
+di far fallire l'esecuzione.
 
 ```bash
 BENCH_EXPOSE_ECHO=1 uv run uvicorn arm_mcp.http_server:app --port 8100
@@ -124,6 +162,21 @@ Eseguire la fase 0 (richiede la chiave, mai scritta su file):
 
 ```bash
 uv run python -m harness.smoke_nim
+```
+
+Eseguire un compito con l'uno o l'altro braccio (senza `--task` li esegue
+tutti):
+
+```bash
+uv run python -m arm_mcp.host --task t2_disambiguazione
+uv run python -m arm_langchain.agent --task t2_disambiguazione
+```
+
+Eseguire la campagna. E' riprendibile: rilanciandola sulla stessa
+cartella salta le esecuzioni gia' presenti.
+
+```bash
+uv run python -m harness.campaign --repetitions 3
 ```
 
 ## Note metodologiche
@@ -153,6 +206,43 @@ leggendo i file invece di rieseguire. Il nome del file contiene braccio,
 modello, compito, istante e identificativo: nessuna esecuzione puo'
 sovrascriverne un'altra. Le intestazioni HTTP non sono mai registrate,
 perche' conterrebbero la chiave API.
+
+**Conteggio delle chiamate REST.** Il braccio MCP esegue le chiamate dal
+processo del **server MCP**, non da quello dell'host: la variabile di
+contesto che porta l'identificativo di esecuzione non lo raggiunge,
+quindi l'intestazione `X-Run-Id` non viene apposta. Con il solo contatore
+per identificativo il braccio MCP risultava avere **zero** chiamate REST,
+in silenzio — una delle due metriche portanti azzerata. Far viaggiare
+l'identificativo dentro il protocollo richiederebbe di aggiungere un
+argomento agli strumenti, cioe' rompere la parita' degli schemi. Il
+wrapper espone percio' anche un contatore incondizionato
+(`/__bench__/global`), che la campagna azzera prima di ogni esecuzione e
+legge dopo: essendo le esecuzioni seriali, il totale appartiene per
+intero all'ultima.
+
+**Il modello e' una configurazione volatile.** I modelli ospitati vengono
+ritirati: `meta/llama-3.3-70b-instruct`, usato nella prima campagna, e'
+stato dismesso il 26 agosto 2026 e da allora l'endpoint risponde 410. Ogni
+risultato va percio' riportato indicando modello e data, e i dati raccolti
+con un modello dismesso non sono piu' riproducibili. Il modello corrente e'
+`openai/gpt-oss-120b`.
+
+**Parita' dell'input: cosa e' esatto e cosa e' tollerato.** Il gate sui
+messaggi confronta il **contenuto** in modo esatto, dopo aver escluso gli
+identificativi delle chiamate a strumento, che l'endpoint genera a caso.
+Il conteggio dei token e' invece un controllo secondario con tolleranza:
+su contenuto identico carattere per carattere si e' osservata
+un'oscillazione fra 1089 e 1122 token, perche' sequenze esadecimali
+diverse si segmentano in modo diverso. La tolleranza e' calibrata su
+quella variabilita' misurata.
+
+**Campi non canonici nella conversazione.** L'host MCP riaccoda una forma
+canonica del messaggio dell'assistente — solo `role`, `content` e
+`tool_calls` — e non l'oggetto grezzo dell'API. Alcuni modelli vi
+aggiungono campi propri: `gpt-oss` restituisce `reasoning_content` con la
+catena di ragionamento, e riaccodarlo rimanderebbe al modello, a ogni
+giro, testo estraneo alla conversazione, rompendo inoltre la parita' con
+il braccio LangChain, che normalizza allo stesso modo.
 
 **Alternanza dei bracci nella campagna (fase 6).** Due esecuzioni
 identiche della fase 0 hanno dato 18–164 s con un ritentativo 503 e
