@@ -4,22 +4,22 @@ version = "0.1.0"
 description = "Valutazione sperimentale MCP vs LangChain per la tesi triennale"
 requires-python = ">=3.12"
 dependencies = [
-    # Protocollo e trasporto
+    # Braccio MCP: protocollo e trasporto
     "mcp>=1.2",
     "httpx>=0.28",
+    # Lettura del file .env con la chiave API
+    "python-dotenv>=1.0",
+    # Braccio LangChain. Non sono opzionali: l'esperimento A misura una
+    # condizione LangChain e il gate sugli schemi confronta i due bracci,
+    # quindi entrambi importano queste librerie a livello di modulo.
+    "langchain>=0.3",
+    "langgraph>=0.3",
+    "langchain-nvidia-ai-endpoints>=0.3",
     # Necessarie per importare l'applicazione Event Manager
     "fastapi[standard]>=0.115",
     "sqlmodel>=0.0.22",
     "faker>=30",
     "email-validator>=2.0",
-]
-
-[project.optional-dependencies]
-# Installate alla fase 3, quando serve il braccio LangChain
-langchain = [
-    "langchain>=0.3",
-    "langgraph>=0.3",
-    "langchain-nvidia-ai-endpoints>=0.3",
 ]
 
 [tool.uv]

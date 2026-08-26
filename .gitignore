@@ -10,3 +10,12 @@ __pycache__/
 
 # Artefatti LaTeX vaganti
 texput.log
+
+# Segreti: la chiave API non deve mai entrare nel repository
+.env
+.env.*
+!.env.example
+
+# Esecuzioni singole ad hoc, rigenerabili
+results/traces/
+results/smoke_*.json

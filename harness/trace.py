@@ -32,6 +32,7 @@ Uso tipico dentro un ciclo agentico::
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -48,8 +49,18 @@ _REDACT = {"api_key", "authorization", "headers"}
 
 
 def _clean(payload: dict[str, Any]) -> dict[str, Any]:
-    """Copia il payload escludendo qualunque campo possa contenere segreti."""
-    return {k: v for k, v in payload.items() if k.lower() not in _REDACT}
+    """Copia il payload escludendo i campi che potrebbero contenere segreti.
+
+    La copia e' **profonda**, e non e' un dettaglio. Un ciclo agentico
+    tiene di norma una sola lista di messaggi e vi aggiunge in coda a ogni
+    giro; registrarne il riferimento farebbe si' che ogni chiamata
+    salvata rifletta lo stato *finale* della conversazione anziche' quello
+    al momento dell'invio. Osservato: la prima chiamata di una esecuzione
+    a due iterazioni risultava contenere tutti e cinque i messaggi.
+    """
+    return copy.deepcopy(
+        {k: v for k, v in payload.items() if k.lower() not in _REDACT}
+    )
 
 
 def _slug(text: str) -> str:

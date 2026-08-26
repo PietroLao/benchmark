@@ -44,13 +44,24 @@ from typing import Any
 import httpx
 
 from harness.trace import RunTrace
+from shared.env import ENV_PATH  # carica .env, se presente  # noqa: F401
 from shared.tools_spec import openai_tools_format
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
 BASE_URL = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-MODEL = os.environ.get("NIM_MODEL", "meta/llama-3.3-70b-instruct")
-API_KEY = os.environ.get("NVIDIA_API_KEY", "")
+MODEL = os.environ.get("NIM_MODEL", "openai/gpt-oss-120b")
+
+
+def _api_key() -> str:
+    """Legge la chiave al momento dell'uso, non all'import.
+
+    Il file ``.env`` viene caricato dall'import di ``shared.env``, che
+    avviene prima; leggere la chiave a livello di modulo la fisserebbe
+    comunque al valore presente in quell'istante, rendendo inefficace
+    qualunque impostazione successiva.
+    """
+    return os.environ.get("NVIDIA_API_KEY", "")
 
 #: Traccia integrale dell'esecuzione. La fase 0 non è un esperimento, ma
 #: registrarla serve comunque a due cose: verificare che l'endpoint
@@ -96,15 +107,29 @@ def _post(payload: dict[str, Any]) -> tuple[httpx.Response, float]:
     last: httpx.Response | None = None
     for attempt in range(MAX_ATTEMPTS):
         start = time.perf_counter()
-        response = httpx.post(
-            f"{BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=180.0,
-        )
+        try:
+            response = httpx.post(
+                f"{BASE_URL}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {_api_key()}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=240.0,
+            )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            # Stesso motivo di ``shared/nim.py``: un timeout non e' un
+            # codice di stato e senza questo ramo interromperebbe la
+            # verifica invece di essere ritentato.
+            delay = min(2**attempt, 30)
+            trace.event(
+                "retry_timeout", detail=f"{type(exc).__name__}", backoff_s=delay
+            )
+            print(f"  ~ {type(exc).__name__}, ritento fra {delay}s")
+            if attempt == MAX_ATTEMPTS - 1:
+                raise
+            time.sleep(delay)
+            continue
         elapsed = time.perf_counter() - start
         if response.status_code not in RETRYABLE:
             return response, elapsed
@@ -163,10 +188,11 @@ def chat(messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None) -> 
 
 
 def main() -> int:
-    if not API_KEY:
+    if not _api_key():
         print(f"{KO} NVIDIA_API_KEY non impostata.")
         print("  Ottieni una chiave gratuita su https://build.nvidia.com")
-        print("  poi:  export NVIDIA_API_KEY=nvapi-...")
+        print("  poi inserirla in .env (cp .env.example .env)")
+        print("  oppure:  export NVIDIA_API_KEY=nvapi-...")
         return 1
 
     tools = openai_tools_format()

@@ -1156,15 +1156,12 @@ dependencies = [
     { name = "faker" },
     { name = "fastapi", extra = ["standard"] },
     { name = "httpx" },
-    { name = "mcp" },
-    { name = "sqlmodel" },
-]
-
-[package.optional-dependencies]
-langchain = [
     { name = "langchain" },
     { name = "langchain-nvidia-ai-endpoints" },
     { name = "langgraph" },
+    { name = "mcp" },
+    { name = "python-dotenv" },
+    { name = "sqlmodel" },
 ]
 
 [package.metadata]
@@ -1173,13 +1170,13 @@ requires-dist = [
     { name = "faker", specifier = ">=30" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.28" },
-    { name = "langchain", marker = "extra == 'langchain'", specifier = ">=0.3" },
-    { name = "langchain-nvidia-ai-endpoints", marker = "extra == 'langchain'", specifier = ">=0.3" },
-    { name = "langgraph", marker = "extra == 'langchain'", specifier = ">=0.3" },
+    { name = "langchain", specifier = ">=0.3" },
+    { name = "langchain-nvidia-ai-endpoints", specifier = ">=0.3" },
+    { name = "langgraph", specifier = ">=0.3" },
     { name = "mcp", specifier = ">=1.2" },
+    { name = "python-dotenv", specifier = ">=1.0" },
     { name = "sqlmodel", specifier = ">=0.0.22" },
 ]
-provides-extras = ["langchain"]
 
 [[package]]
 name = "mcp-types"

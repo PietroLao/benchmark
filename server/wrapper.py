@@ -79,14 +79,35 @@ def _is_counted(path: str) -> bool:
     return not path.startswith(EXCLUDED_PREFIXES)
 
 
+#: Conteggio incondizionato, indipendente dall'intestazione X-Run-Id.
+#:
+#: Serve al braccio MCP. Le sue chiamate REST partono dal processo del
+#: **server MCP**, non da quello dell'host: la variabile di contesto che
+#: porta l'identificativo di esecuzione vive nel processo dell'host e non
+#: lo raggiunge, quindi l'intestazione non viene apposta e il conteggio
+#: per esecuzione resterebbe a zero. Verificato: due invocazioni via MCP
+#: producevano un conteggio di zero.
+#:
+#: Attribuire per identificativo richiederebbe di far viaggiare la run
+#: dentro il protocollo, e l'unica via sarebbe aggiungere un argomento
+#: agli strumenti — cioe' rompere la parita' degli schemi, che e' il
+#: controllo su cui poggia l'intero confronto. Poiche' le esecuzioni
+#: della campagna sono seriali, azzerare questo contatore prima di
+#: ciascuna e leggerlo dopo attribuisce comunque in modo esatto.
+global_calls: Counter[str] = Counter()
+
+
 @app.middleware("http")
 async def count_rest_calls(request: Request, call_next):
-    """Attribuisce ogni chiamata REST alla run che l'ha generata."""
+    """Conta ogni chiamata REST, per esecuzione e in modo incondizionato."""
     response = await call_next(request)
-    run_id = request.headers.get("X-Run-Id")
-    if run_id and _is_counted(request.url.path):
-        key = f"{request.method} {request.scope.get('route').path if request.scope.get('route') else request.url.path}"
-        rest_calls.setdefault(run_id, Counter())[key] += 1
+    if _is_counted(request.url.path):
+        route = request.scope.get("route")
+        key = f"{request.method} {route.path if route else request.url.path}"
+        global_calls[key] += 1
+        run_id = request.headers.get("X-Run-Id")
+        if run_id:
+            rest_calls.setdefault(run_id, Counter())[key] += 1
     return response
 
 
@@ -114,6 +135,22 @@ def reset_counter(run_id: str) -> dict[str, Any]:
     """Azzera il conteggio delle chiamate REST per una run."""
     rest_calls.pop(run_id, None)
     return {"ok": True, "run_id": run_id}
+
+
+@bench.post("/global/reset")
+def reset_global() -> dict[str, Any]:
+    """Azzera il contatore incondizionato, prima di una esecuzione."""
+    global_calls.clear()
+    return {"ok": True}
+
+
+@bench.get("/global")
+def get_global() -> dict[str, Any]:
+    """Legge il contatore incondizionato, dopo una esecuzione."""
+    return {
+        "total": sum(global_calls.values()),
+        "by_endpoint": dict(global_calls),
+    }
 
 
 @bench.get("/counters/{run_id}")
