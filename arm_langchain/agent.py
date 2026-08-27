@@ -17,7 +17,7 @@ confrontabili.
 
 Uso::
 
-    uv run python -m arm_langchain.agent --task t2_disambiguazione
+    uv run python -m arm_langchain.agent --task t3_join_titoli
 """
 
 from __future__ import annotations

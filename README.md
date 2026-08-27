@@ -46,15 +46,22 @@ deserializzazione — non confrontando definizioni in memoria, che
 sarebbero identiche per costruzione. Resta da verificare `messages`, che
 dipende dai loop agentici.
 
-`harness/messages_gate.py` verifica `messages`, confrontando due tracce
-reali dello stesso compito. Il confronto non e' letterale: identificativi
-di chiamata generati a caso, `content: null` contro campo assente e campi
-in piu' nella ricostruzione LangChain sono differenze prive di
-significato semantico, e vengono normalizzate. Resta come prova
-indipendente il **conteggio dei token in ingresso** riportato
-dall'endpoint, che non dipende dal nostro codice di registrazione: se
-coincide, il modello ha ricevuto lo stesso input. Verificato su
-`t1_conteggio`: 1173 e 1735 token, identici in entrambe le interrogazioni.
+`harness/messages_gate.py` verifica `messages`, ma **va riscritto** e nella
+forma attuale non costituisce una prova. Confronta due tracce dello stesso
+compito, ed entrambe sono ricostruzioni: quella LangChain nasce da
+`convert_to_openai_messages` dentro il callback, che produce qualcosa di
+simile al payload trasmesso e non il payload. Il gate e' percio' cieco a
+tutto cio' che il framework aggiunge o toglie sul filo, ed e' esattamente
+li' che si annidavano le due divergenze poi corrette: il rimando del
+ragionamento dei giri precedenti e l'assenza di `name` sui messaggi di
+strumento. Nessuna delle due era stata segnalata.
+
+Cade con esso anche la tolleranza sul conteggio dei token in ingresso,
+giustificata con la segmentazione casuale degli identificativi di
+chiamata: il braccio MCP produce lo stesso conteggio a ogni ripetizione,
+quindi quella spiegazione e' falsa e la tolleranza mascherava proprio la
+divergenza da intercettare. La riscrittura deve poggiare sul payload reale
+catturato da `arm_langchain/wire.py`.
 
 ```bash
 uv run python -m harness.schema_gate
@@ -80,7 +87,7 @@ uv run python -m harness.messages_gate --task t1_conteggio
 ```
 shared/tools_spec.py     definizione unica degli strumenti
 shared/operations.py     unica implementazione delle chiamate REST
-shared/tasks.py          prompt di sistema condiviso e cinque compiti
+shared/tasks.py          prompt di sistema condiviso e sei compiti
 server/wrapper.py        avvolge l'Event Manager: conteggio REST + reset
 server/fixture.py        dataset deterministico e leggibile
 arm_mcp/server.py        server MCP (API di basso livello, schemi espliciti)
@@ -182,8 +189,8 @@ Eseguire un compito con l'uno o l'altro braccio (senza `--task` li esegue
 tutti):
 
 ```bash
-uv run python -m arm_mcp.host --task t2_disambiguazione
-uv run python -m arm_langchain.agent --task t2_disambiguazione
+uv run python -m arm_mcp.host --task t3_join_titoli
+uv run python -m arm_langchain.agent --task t3_join_titoli
 ```
 
 Eseguire la campagna. E' riprendibile: rilanciandola sulla stessa

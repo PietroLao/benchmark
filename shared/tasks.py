@@ -12,19 +12,35 @@ indistinguibile da un effetto del protocollo. Il framework, di suo, non ne
 aggiunge alcuno — verificato: senza ``system_prompt`` esplicito
 ``create_agent`` invia al modello il solo messaggio dell'utente.
 
-I compiti sono cinque, come concordato: la valutazione è deliberatamente
-piccola, e serve a osservare *come* i due bracci lavorano, non a coprire
-un dominio.
+I compiti sono sei: la valutazione è deliberatamente piccola, e serve a
+osservare *come* i due bracci lavorano, non a coprire un dominio.
+
+Sono scelti in modo che il **numero di invocazioni non sia determinato
+dal testo della richiesta**. È il criterio che l'insieme precedente non
+soddisfaceva: ``list_events`` restituisce ogni campo di ogni evento e non
+accetta filtri, quindi contare gli eventi, trovare quello di Cagliari ed
+elencare quelli di ottobre si risolvevano tutti e tre con una sola
+lettura seguita dalla risposta. Erano lo stesso compito con tre domande
+diverse, e su di essi il conteggio delle iterazioni misurava una
+proprietà del compito anziché dell'approccio. Un solo compito di quella
+forma è rimasto, come riferimento dichiarato.
+
+L'escursione viene da tre fonti distinte: una soluzione ottenibile per
+vie di lunghezza diversa (``t3``), un numero di operazioni che si scopre
+solo eseguendo (``t5``), e un'operazione che fallisce e va riconosciuta
+come tale (``t6``).
 
 La risposta attesa di ciascun compito è ricavabile dai dati di prova
 (``server/fixture.py``) ed è unica per costruzione: un solo evento a
-Cagliari, esattamente tre eventi in ottobre, ``mrossi`` iscritto
-esattamente a quei tre, tre iscritti all'evento 1.
+Cagliari, esattamente tre eventi in ottobre, ``svitale`` iscritta agli
+eventi 1 e 7, ``mrossi`` a tre eventi, ``lferrari`` già iscritta
+all'evento 3.
 """
 
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,11 +60,36 @@ SYSTEM_PROMPT = (
 #: impedire che un ciclo non terminante blocchi la campagna; se viene
 #: raggiunto, l'esecuzione va registrata come fallita anziché scartata in
 #: silenzio.
-MAX_ITERATIONS = 8
+#:
+#: Il valore va tenuto ben sopra il minimo richiesto dal compito più
+#: lungo, altrimenti smette di essere una rete di sicurezza e diventa
+#: esso stesso la causa dei fallimenti. ``t5`` richiede almeno cinque
+#: interrogazioni — una lettura, tre cancellazioni, la risposta — e le
+#: cancellazioni non sono accorpabili, perché l'endpoint rifiuta le
+#: risposte con più di una chiamata a strumento. Un margine di due o tre
+#: giri non basta a distinguere un agente che sbaglia strada da uno a cui
+#: è stata tolta la strada.
+MAX_ITERATIONS = 14
 
 
 def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text.lower()).strip()
+    """Riduce alla forma su cui si confronta.
+
+    Oltre a minuscole e spazi, appiattisce le vocali accentate e la
+    convenzione dattilografica che le rende con l'apostrofo. Il modello
+    scrive ora ``già``, ora ``gia'``, ora ``gia``, e la differenza non ha
+    alcun significato: senza questo, la verifica boccerebbe risposte
+    corrette per il modo in cui e' stato reso un accento.
+
+    L'apostrofo si toglie **solo dopo vocale**, che in italiano e'
+    praticamente sempre l'accento reso a macchina. Dopo consonante
+    l'apostrofo e' un'elisione vera (``dell'evento``, ``l'iscrizione``) e
+    va conservato, altrimenti si salderebbero due parole distinte.
+    """
+    piatto = unicodedata.normalize("NFKD", text.lower())
+    piatto = "".join(c for c in piatto if not unicodedata.combining(c))
+    piatto = re.sub(r"(?<=[aeiou])'", "", piatto)
+    return re.sub(r"\s+", " ", piatto).strip()
 
 
 @dataclass(frozen=True)
@@ -74,6 +115,16 @@ class Task:
     #: Se vero, il compito modifica lo stato: richiede un ripristino dei
     #: dati prima di ogni esecuzione.
     mutates_state: bool = False
+    #: Iscrizioni che devono risultare presenti al termine, come coppie
+    #: ``(username, event_id)``.
+    state_present: tuple[tuple[str, int], ...] = ()
+    #: Iscrizioni che non devono risultare presenti. Un ``event_id`` a
+    #: ``None`` vale come "nessuna iscrizione di questo utente".
+    state_absent: tuple[tuple[str, int | None], ...] = ()
+    #: Numero totale di iscrizioni atteso al termine. Intercetta gli
+    #: effetti collaterali: un agente che cancella l'iscrizione giusta e
+    #: per errore anche un'altra supererebbe i due controlli precedenti.
+    state_total: int | None = None
 
     def check(self, answer: str) -> bool:
         """Verifica la risposta finale.
@@ -106,32 +157,20 @@ TASKS: tuple[Task, ...] = (
         rationale=(
             "Compito minimo: una sola lettura e nessuna disambiguazione. "
             "Stabilisce il costo di base del ciclo, contro cui si leggono "
-            "gli altri."
+            "gli altri. E' l'unico in cui la lunghezza della soluzione e' "
+            "fissata dal compito, ed e' tenuto proprio per questo: serve da "
+            "riferimento, non da misura."
         ),
         expected="8",
         must_contain=(("8", "otto"),),
         min_tool_calls=1,
     ),
     Task(
-        task_id="t2_disambiguazione",
-        prompt="Qual e' il titolo dell'evento che si tiene a Cagliari?",
-        rationale=(
-            "Richiede di filtrare la lista per un attributo. Lo strumento "
-            "non accetta filtri, quindi il modello deve recuperare tutti gli "
-            "eventi ed esaminarli: mette alla prova la descrizione dello "
-            "strumento, che e' esattamente cio' che cambia fra schema "
-            "esplicito e schema dedotto."
-        ),
-        expected="Conferenza sull'Intelligenza Artificiale (evento 1)",
-        must_contain=(("Intelligenza Artificiale",),),
-        min_tool_calls=1,
-    ),
-    Task(
-        task_id="t3_filtro_temporale",
+        task_id="t2_filtro_temporale",
         prompt="Quali eventi si tengono nel mese di ottobre? Elencane i titoli.",
         rationale=(
-            "Filtro su una data anziche' su una stringa, con tre risultati "
-            "attesi invece di uno: verifica che il modello non si fermi al "
+            "Una sola lettura, ma tre risultati attesi invece di uno e un "
+            "filtro su una data: verifica che il modello non si fermi al "
             "primo elemento utile."
         ),
         expected=(
@@ -146,33 +185,105 @@ TASKS: tuple[Task, ...] = (
         min_tool_calls=1,
     ),
     Task(
-        task_id="t4_join",
-        prompt="A quanti eventi e' iscritto l'utente con username mrossi?",
-        rationale=(
-            "Richiede di mettere in relazione due entita' distinte, "
-            "iscrizioni e utenti, che nessuno strumento restituisce gia' "
-            "collegate."
+        task_id="t3_join_titoli",
+        prompt=(
+            "Quali sono i titoli degli eventi a cui e' iscritta l'utente "
+            "con username svitale?"
         ),
-        expected="3",
-        must_contain=(("3", "tre"),),
-        min_tool_calls=1,
+        rationale=(
+            "Mette davvero in relazione due entita': ``list_registrations`` "
+            "restituisce identificativi di evento, non titoli, e i titoli "
+            "stanno solo fra gli eventi. La lunghezza della soluzione non e' "
+            "fissata: i due titoli si possono ottenere con una sola "
+            "``list_events`` oppure con due ``get_event``, e quale via il "
+            "modello scelga e' una decisione sua. E' il primo compito in cui "
+            "il numero di invocazioni ha escursione."
+        ),
+        expected=(
+            "Conferenza sull'Intelligenza Artificiale, "
+            "Convegno su Robotica Industriale"
+        ),
+        must_contain=(("Intelligenza Artificiale",), ("Robotica",)),
+        min_tool_calls=2,
     ),
     Task(
-        task_id="t5_catena_scrittura",
+        task_id="t4_catena_scrittura",
         prompt=(
             "Iscrivi Paolo Greco, username pgreco, email paolo.greco@example.it, "
             "all'evento che si tiene a Cagliari."
         ),
         rationale=(
-            "Unico compito che modifica lo stato, e unico a richiedere due "
-            "invocazioni in sequenza dipendente: l'identificativo da passare "
-            "alla seconda si conosce solo dopo la prima. E' il caso in cui un "
-            "ciclo agentico serve davvero."
+            "Due invocazioni in sequenza dipendente: l'identificativo da "
+            "passare alla seconda si conosce solo dopo la prima. E' il caso "
+            "elementare in cui un ciclo agentico serve davvero."
         ),
         expected="iscrizione di pgreco all'evento 1",
         must_contain=(("iscri",),),
         min_tool_calls=2,
         mutates_state=True,
+        state_present=(("pgreco", 1),),
+        state_total=12,
+    ),
+    Task(
+        task_id="t5_cancellazione_multipla",
+        prompt="Cancella tutte le iscrizioni dell'utente mrossi.",
+        rationale=(
+            "Il numero di invocazioni non e' deducibile dal testo della "
+            "richiesta: si scopre eseguendo la prima. ``mrossi`` risulta "
+            "iscritto a tre eventi, quindi la via piu' breve e' una lettura "
+            "e tre cancellazioni, ma un agente puo' legittimamente "
+            "rileggere per verificare. E' il compito con la maggiore "
+            "escursione sul numero di iterazioni, ed e' l'unico che eserciti "
+            "``delete_registration``."
+        ),
+        expected="le tre iscrizioni di mrossi (eventi 3, 4, 5) rimosse",
+        must_contain=(("cancellat", "eliminat", "rimoss"),),
+        min_tool_calls=4,
+        mutates_state=True,
+        state_absent=(("mrossi", None),),
+        state_total=8,
+    ),
+    Task(
+        task_id="t6_conflitto",
+        prompt=(
+            "Iscrivi Laura Ferrari, username lferrari, "
+            "email laura.ferrari@example.it, all'Hackathon Open Source."
+        ),
+        rationale=(
+            "L'iscrizione richiesta esiste gia', quindi lo strumento "
+            "fallisce e il compito si risolve riconoscendo il fallimento e "
+            "riferendolo, non riprovando. E' il solo compito in cui i due "
+            "bracci differiscono per meccanismo e non per involucro: MCP "
+            "segnala l'errore con ``isError`` sul risultato, mentre in "
+            "LangChain ``ToolNode`` intercetta l'eccezione e la consegna al "
+            "modello come contenuto di un messaggio di strumento. Il modello "
+            "vede quindi due cose diverse, e come reagisce e' precisamente "
+            "cio' che questo compito misura."
+        ),
+        expected="fallimento: lferrari e' gia' iscritta all'evento 3",
+        must_contain=(
+            ("lferrari", "laura"),
+            # Le varianti con accento o apostrofo non servono: la
+            # normalizzazione le riporta tutte a questa forma.
+            (
+                "gia iscritt",
+                "gia registrat",
+                "gia present",
+                "esiste gia",
+                "duplicat",
+                "non e stato possibile",
+                "fallit",
+                "errore",
+            ),
+        ),
+        min_tool_calls=2,
+        # Nulla deve cambiare. Un agente che cancellasse l'iscrizione per
+        # poi ricrearla lascerebbe comunque lo stato in questa forma, ed e'
+        # una soluzione legittima: il controllo verifica l'esito, non la
+        # strada.
+        mutates_state=True,
+        state_present=(("lferrari", 3),),
+        state_total=11,
     ),
 )
 
@@ -189,9 +300,17 @@ def verify_state(task: Task, registrations: list[dict[str, Any]]) -> bool | None
     """
     if not task.mutates_state:
         return None
-    if task.task_id == "t5_catena_scrittura":
-        return any(
-            r.get("username") == "pgreco" and r.get("event_id") == 1
-            for r in registrations
-        )
-    return None
+
+    presenti = {(r.get("username"), r.get("event_id")) for r in registrations}
+
+    if task.state_total is not None and len(registrations) != task.state_total:
+        return False
+    if any(coppia not in presenti for coppia in task.state_present):
+        return False
+    for username, event_id in task.state_absent:
+        if event_id is None:
+            if any(u == username for u, _ in presenti):
+                return False
+        elif (username, event_id) in presenti:
+            return False
+    return True

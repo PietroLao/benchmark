@@ -50,7 +50,13 @@ from shared.tasks import TASKS, TASKS_BY_ID, Task
 BENCH_URL = "http://127.0.0.1:8000/__bench__"
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
-ARMS = ("mcp", "langchain")
+#: I tre bracci. ``mcp-conforme`` non e' una variante di comodo: e' la
+#: condizione che pareggia il contesto presentato al modello, senza la
+#: quale le differenze osservate non sarebbero attribuibili al meccanismo.
+#: ``mcp`` e' la forma che si scriverebbe davvero. Lo scarto fra i due
+#: misura quanto costa la gestione del contesto di LangChain, che con due
+#: soli bracci sarebbe rimasta invisibile perche' l'avevamo soppressa.
+ARMS = ("mcp", "mcp-conforme", "langchain")
 
 
 def _reset_state() -> None:
@@ -75,10 +81,10 @@ async def run_one(arm: str, task: Task, model: str, repetition: int) -> RunTrace
     """Esegue una singola combinazione e restituisce la traccia."""
     _reset_state()
 
-    if arm == "mcp":
+    if arm in ("mcp", "mcp-conforme"):
         from arm_mcp.host import run_task as run_mcp
 
-        trace = await run_mcp(task, model=model)
+        trace = await run_mcp(task, model=model, conforme=arm == "mcp-conforme")
     else:
         from arm_langchain.agent import run_task as run_lc
 

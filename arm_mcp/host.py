@@ -15,9 +15,33 @@ volta e si riusa per tutte le invocazioni. E' la configurazione sensata,
 ed e' anche quella che l'esperimento A ha mostrato costare circa otto
 volte meno di riaprirla a ogni chiamata.
 
+Due condizioni
+--------------
+
+L'host si esegue in due forme, e la distinzione e' metodologica.
+
+``mcp`` e' la forma **idiomatica**: quella che scriverebbe chi costruisce
+un host senza avere un framework da imitare. Non rimanda al modello il
+ragionamento dei giri precedenti e include ``name`` sui messaggi di
+strumento.
+
+``mcp-conforme`` riproduce sul filo **esattamente** cio' che trasmette
+LangChain, verificato con ``arm_langchain/wire.py``: ritrasmette
+``reasoning`` e ``reasoning_content`` a ogni giro e omette ``name``.
+
+Servono entrambe perche' pareggiare il contesto e' l'unico modo di
+attribuire al meccanismo le differenze osservate, ma pareggiarlo cancella
+una differenza che e' reale e che chi adotta LangChain subisce davvero.
+Il confronto ``mcp-conforme`` contro ``langchain`` isola il meccanismo;
+``mcp`` contro ``langchain`` dice cosa si ottiene in pratica; ``mcp``
+contro ``mcp-conforme`` attribuisce lo scarto alla gestione del contesto
+del framework. Misurato in precedenza: +33 token in ingresso alla seconda
+interrogazione, +84 alla terza.
+
 Uso::
 
-    uv run python -m arm_mcp.host --task t2_disambiguazione
+    uv run python -m arm_mcp.host --task t3_join_titoli
+    uv run python -m arm_mcp.host --task t3_join_titoli --conforme
 """
 
 from __future__ import annotations
@@ -39,6 +63,7 @@ from shared.tasks import MAX_ITERATIONS, SYSTEM_PROMPT, TASKS, TASKS_BY_ID, Task
 
 MCP_HTTP_URL = "http://127.0.0.1:8100/mcp/"
 ARM = "mcp"
+ARM_CONFORME = "mcp-conforme"
 
 
 def to_openai_tools(tools: list[types.Tool]) -> list[dict[str, Any]]:
@@ -72,10 +97,16 @@ async def run_task(
     model: str,
     url: str = MCP_HTTP_URL,
     max_iterations: int = MAX_ITERATIONS,
+    conforme: bool = False,
 ) -> RunTrace:
-    """Esegue un compito e restituisce la traccia completa dell'esecuzione."""
+    """Esegue un compito e restituisce la traccia completa dell'esecuzione.
+
+    ``conforme`` sceglie fra le due condizioni descritte in cima al modulo:
+    a ``False`` l'host si comporta come lo scriverebbe il suo autore, a
+    ``True`` riproduce sul filo esattamente cio' che trasmette LangChain.
+    """
     trace = RunTrace(
-        arm=ARM,
+        arm=ARM_CONFORME if conforme else ARM,
         model=model,
         task_id=task.task_id,
         prompt=task.prompt,
@@ -85,6 +116,7 @@ async def run_task(
             "max_iterations": max_iterations,
             "system_prompt": SYSTEM_PROMPT,
             "url": url,
+            "conforme": conforme,
         },
     )
 
@@ -135,27 +167,24 @@ async def run_task(
 
                 # Si riaccoda una forma **canonica** del messaggio, non
                 # l'oggetto grezzo restituito dall'API, che porta anche
-                # ``annotations``, ``audio`` e ``refusal``. L'insieme dei
-                # campi riprodotto qui e' esattamente quello che LangChain
-                # trasmette sul filo, verificato intercettando il payload
-                # HTTP reale del braccio: ``content``, ``reasoning``,
-                # ``reasoning_content``, ``role``, ``tool_calls``.
+                # ``annotations``, ``audio`` e ``refusal``.
                 #
-                # I due campi di ragionamento vanno riaccodati anche se
-                # sembrano superflui. ``ChatNVIDIA`` li conserva in
-                # ``additional_kwargs`` e li rimanda al modello a ogni
-                # giro; ometterli qui significherebbe presentare al
-                # modello un contesto piu' povero nel braccio MCP. La
-                # divergenza era misurabile e cresceva con la profondita'
-                # della conversazione: +33 token in ingresso alla seconda
-                # interrogazione, +84 alla terza.
+                # Nella condizione conforme si aggiungono i due campi di
+                # ragionamento, perche' ``ChatNVIDIA`` li conserva in
+                # ``additional_kwargs`` e li ritrasmette a ogni giro. Nella
+                # condizione idiomatica si omettono: e' testo che il
+                # modello ha gia' prodotto e che nessun autore di host
+                # rimanderebbe indietro. Lo scarto fra le due misura il
+                # costo di quella scelta del framework, ed e' il motivo per
+                # cui entrambe vengono eseguite.
                 canonico: dict[str, Any] = {
                     "role": "assistant",
                     "content": message.get("content"),
                 }
-                for campo in ("reasoning_content", "reasoning"):
-                    if message.get(campo) is not None:
-                        canonico[campo] = message[campo]
+                if conforme:
+                    for campo in ("reasoning_content", "reasoning"):
+                        if message.get(campo) is not None:
+                            canonico[campo] = message[campo]
                 if tool_calls:
                     canonico["tool_calls"] = tool_calls
                 messages.append(canonico)
@@ -189,19 +218,20 @@ async def run_task(
                         via="mcp/tools_call",
                         is_error=result.is_error,
                     )
-                    messages.append(
-                        {
-                            # ``name`` e' facoltativo nel formato OpenAI e
-                            # non va incluso: il payload HTTP reale di
-                            # LangChain porta solo ``content``, ``role`` e
-                            # ``tool_call_id``. La ricostruzione prodotta
-                            # dal callback lo mostrava, ma non e' cio' che
-                            # il framework trasmette.
-                            "role": "tool",
-                            "tool_call_id": call["id"],
-                            "content": text,
-                        }
-                    )
+                    # ``name`` e' facoltativo nel formato OpenAI. Il payload
+                    # reale di LangChain porta solo ``content``, ``role`` e
+                    # ``tool_call_id``, quindi nella condizione conforme si
+                    # omette; nella condizione idiomatica si include, che e'
+                    # la forma piu' esplicita e quella che si scriverebbe
+                    # non avendo un framework da imitare.
+                    messaggio_strumento: dict[str, Any] = {
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "content": text,
+                    }
+                    if not conforme:
+                        messaggio_strumento["name"] = fn["name"]
+                    messages.append(messaggio_strumento)
 
             trace.event("limite_iterazioni", limit=max_iterations)
             trace.finish(status="limite_iterazioni")
@@ -213,14 +243,22 @@ async def main() -> int:
     parser.add_argument("--task", default=None, help="id del compito; vuoto = tutti")
     parser.add_argument("--model", default="openai/gpt-oss-120b")
     parser.add_argument("--url", default=MCP_HTTP_URL)
+    parser.add_argument(
+        "--conforme",
+        action="store_true",
+        help="riproduce sul filo cio' che trasmette LangChain",
+    )
     parsed = parser.parse_args()
 
+    arm = ARM_CONFORME if parsed.conforme else ARM
     tasks = [TASKS_BY_ID[parsed.task]] if parsed.task else list(TASKS)
     for task in tasks:
-        trace = await run_task(task, model=parsed.model, url=parsed.url)
+        trace = await run_task(
+            task, model=parsed.model, url=parsed.url, conforme=parsed.conforme
+        )
         m = trace.metrics()
         print(
-            f"[{ARM}] {task.task_id:<22} {trace.status:<16} "
+            f"[{arm}] {task.task_id:<22} {trace.status:<16} "
             f"iterazioni={m['n_llm_calls']} strumenti={m['n_tool_calls']} "
             f"tempo={m['latency_llm_s']:.1f}s"
         )
