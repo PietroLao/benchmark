@@ -1,7 +1,14 @@
 """Fase 6 — esecuzione della campagna di misura.
 
-Esegue i compiti con entrambi i bracci, su uno o piu' modelli, ripetendo
+Esegue i compiti con tutti i bracci, su uno o piu' modelli, ripetendo
 ciascuna combinazione, e salva una traccia per esecuzione.
+
+I bracci sono tre e non due. ``mcp-conforme`` pareggia il contesto
+presentato al modello e permette di attribuire al meccanismo le
+differenze osservate; ``mcp`` e' la forma che si scriverebbe davvero, e il
+confronto fra i due misura quanto costa la gestione del contesto di
+LangChain. Con due soli bracci quel costo restava invisibile, perche'
+l'avevamo soppresso proprio per ottenere la parita'.
 
 Tre discipline governano l'ordine, e nessuna e' cosmetica.
 
@@ -14,8 +21,8 @@ troncamento delle risposte, quindi puo' toccare il numero di iterazioni,
 che e' una delle metriche rivendicate. Eseguire un braccio di mattina e
 l'altro di sera non sarebbe rumore ma un fattore confondente.
 
-**Chi va per primo si alterna** a ogni cella, cosi' che nessuno dei due
-paghi sistematicamente il costo di essere sempre il primo o il secondo.
+**L'ordine ruota** a ogni cella, cosi' che nessuno dei tre paghi
+sistematicamente il costo di essere sempre il primo o l'ultimo.
 
 **Lo stato viene ripristinato prima di ogni esecuzione**, non solo prima
 dei compiti che scrivono. Costa poco e rimuove in blocco ogni dipendenza
@@ -127,18 +134,23 @@ def build_plan(
 ) -> list[tuple[str, Task, str, int]]:
     """Costruisce l'ordine di esecuzione.
 
-    Entro ogni cella i due bracci sono consecutivi, cosi' che incontrino
-    lo stesso stato dell'endpoint; l'ordine si inverte a ogni cella.
+    Entro ogni cella i bracci sono consecutivi, cosi' che incontrino lo
+    stesso stato dell'endpoint. L'ordine **ruota** a ogni cella invece di
+    invertirsi: con tre bracci l'inversione produrrebbe due soli ordini su
+    sei, e uno dei tre resterebbe sempre in posizione centrale. La
+    rotazione fa occupare a ciascuno ogni posizione un terzo delle volte,
+    che e' quanto serve perche' nessuno paghi sistematicamente il costo di
+    essere il primo o l'ultimo.
     """
     plan: list[tuple[str, Task, str, int]] = []
-    flip = False
+    cella = 0
     for rep in range(1, repetitions + 1):
         for task in tasks:
             for model in models:
-                arms = tuple(reversed(ARMS)) if flip else ARMS
-                for arm in arms:
+                k = cella % len(ARMS)
+                for arm in ARMS[k:] + ARMS[:k]:
                     plan.append((arm, task, model, rep))
-                flip = not flip
+                cella += 1
     return plan
 
 

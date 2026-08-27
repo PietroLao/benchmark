@@ -12,6 +12,28 @@ ecosistema. Il confronto e' quindi tra *approcci di orchestrazione*, non
 tra due modi di usare lo stesso framework: instradare MCP attraverso
 `langchain-mcp-adapters` misurerebbe LangChain-che-parla-MCP, non MCP.
 
+### Perche' i bracci eseguiti sono tre
+
+Pareggiare il contesto presentato al modello e' l'unico modo di
+attribuire al meccanismo le differenze osservate. Ma pareggiarlo cancella
+differenze che sono reali: LangChain rimanda al modello, a ogni giro, il
+ragionamento dei giri precedenti, e chi lo adotta quel costo lo paga.
+Sopprimere quella differenza per ottenere la parita' significherebbe
+trasformare in un controllo l'unico risultato che avevamo trovato.
+
+Si esegue percio' anche una terza condizione, e i confronti diventano tre:
+
+| confronto | cosa isola |
+|---|---|
+| `mcp-conforme` contro `langchain` | il meccanismo: stesso contesto, integrazione diversa |
+| `mcp` contro `langchain` | cio' che si ottiene in pratica, senza pareggiare nulla |
+| `mcp` contro `mcp-conforme` | attribuisce lo scarto alla gestione del contesto del framework |
+
+`mcp` e' l'host nella forma che scriverebbe il suo autore; `mcp-conforme`
+riproduce sul filo esattamente cio' che trasmette LangChain, verificato
+con `arm_langchain/wire.py`. Lo scarto misurato fra le due condizioni:
++33 token in ingresso alla seconda interrogazione, +84 alla terza.
+
 ## Il controllo su cui poggia tutto
 
 Il rischio del disegno a due loop e' che i bracci presentino al modello
@@ -74,11 +96,11 @@ uv run python -m harness.messages_gate --task t1_conteggio
 |---|---|---|
 | 0 | Smoke test tool calling su NIM | **superata** |
 | 1 | Server strumentato, fixture, esperimento A | **completata** |
-| 2 | Host MCP standalone con LLM | **implementata**, da eseguire |
+| 2 | Host MCP standalone con LLM | **implementata**, due condizioni (`mcp`, `mcp-conforme`) |
 | 3 | Braccio LangChain | **implementata**, da eseguire |
 | 4 | Parita' dell'input (gate) | **verde** su `tools`; da riscrivere su `messages` |
 | 5 | Caratterizzazione rumore `t_llm` | da fare |
-| 6 | Campagna completa | **implementata**, da eseguire |
+| 6 | Campagna completa | **implementata**, tre bracci x sei compiti, da eseguire |
 | 6b | Riepilogo leggibile della campagna | **implementata** |
 | 7 | Analisi e tabelle LaTeX | da fare |
 
@@ -110,8 +132,9 @@ results/                 un JSON per esecuzione, piu' il riepilogo
 
 Le tracce servono a ricostruire un'esecuzione, non a leggerla: contengono i
 messaggi e gli schemi integrali. Il riepilogo estrae da un'intera cartella
-di tracce le sole grandezze su cui la tesi si pronuncia, con i due bracci
-su righe adiacenti e un valore per ogni ripetizione. Viene generato in coda
+di tracce le sole grandezze su cui la tesi si pronuncia, con i tre bracci
+su righe adiacenti, un valore per ogni ripetizione e i tre confronti
+riportati separatamente. Viene generato in coda
 alla campagna, ed e' rigenerabile in qualunque momento, anche su una
 campagna interrotta a meta':
 

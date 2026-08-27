@@ -185,16 +185,20 @@ def main() -> int:
     parser.add_argument("--task", default="t1_conteggio")
     parsed = parser.parse_args()
 
-    a = latest(f"mcp__*{parsed.task}*.json")
+    # Si confronta ``mcp-conforme``, non ``mcp``. La parita' del contesto
+    # e' cio' che quella condizione realizza per definizione; il braccio
+    # idiomatico diverge di proposito, e passarlo qui produrrebbe un
+    # fallimento che non segnala nulla.
+    a = latest(f"mcp-conforme__*{parsed.task}*.json")
     b = latest(f"langchain__*{parsed.task}*.json")
     if not a or not b:
         print(f"{KO} servono due tracce per il compito {parsed.task}, una per braccio.")
         print("  Eseguire prima:")
-        print(f"    uv run python -m arm_mcp.host --task {parsed.task}")
+        print(f"    uv run python -m arm_mcp.host --task {parsed.task} --conforme")
         print(f"    uv run python -m arm_langchain.agent --task {parsed.task}")
         return 1
 
-    print(f"MCP      : {a.name}")
+    print(f"MCP conf.: {a.name}")
     print(f"LangChain: {b.name}")
 
     ok = compare(json.loads(a.read_text()), json.loads(b.read_text()))

@@ -4,7 +4,7 @@ Una traccia contiene tutto quello che serve a ricostruire un'esecuzione:
 i messaggi, gli schemi, le risposte integrali. E' la sua ragione d'essere,
 ed e' anche il motivo per cui non si puo' leggere. Trenta file da qualche
 decina di migliaia di caratteri non rispondono alla domanda per cui la
-campagna e' stata eseguita, che e' sempre la stessa: **i due bracci si
+campagna e' stata eseguita, che e' sempre la stessa: **i bracci si
 comportano diversamente, e dove.**
 
 Questo modulo estrae quella risposta e la scrive in un unico file
@@ -19,7 +19,7 @@ accanto all'altra e mostravano 100,103,103 contro 38,34,38 — una
 regolarita' che nessun indice sintetico avrebbe reso, e che con tre
 ripetizioni sarebbe stata indistinguibile dal rumore.
 
-**I due bracci stanno su righe adiacenti**, non in tabelle separate. Il
+**I bracci stanno su righe adiacenti**, non in tabelle separate. Il
 confronto e' l'oggetto della misura, non un esercizio lasciato a chi
 legge.
 
@@ -41,7 +41,28 @@ from typing import Any
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
-ARMS = ("mcp", "langchain")
+ARMS = ("mcp", "mcp-conforme", "langchain")
+
+#: I confronti che hanno significato, con cio' che ciascuno isola. Non
+#: sono tre modi di guardare lo stesso dato: rispondono a domande diverse,
+#: e nella tesi vanno riportati come risultati distinti.
+CONFRONTI: tuple[tuple[str, str, str], ...] = (
+    (
+        "mcp-conforme",
+        "langchain",
+        "isola il meccanismo: stesso contesto, integrazione diversa",
+    ),
+    (
+        "mcp",
+        "langchain",
+        "cio' che si ottiene in pratica, senza pareggiare nulla",
+    ),
+    (
+        "mcp",
+        "mcp-conforme",
+        "attribuisce lo scarto alla gestione del contesto del framework",
+    ),
+)
 
 #: Esiti dovuti all'infrastruttura e non al comportamento dell'agente. Un
 #: 503 dell'endpoint o un timeout di rete non dicono nulla su MCP o su
@@ -75,6 +96,33 @@ def _metrica(traccia: dict[str, Any], chiave: str) -> Any:
 
 def _rep(traccia: dict[str, Any]) -> int:
     return (traccia.get("config") or {}).get("repetition") or 0
+
+
+def _mediana(tracce: list[dict[str, Any]], chiave: str) -> float | None:
+    valori = sorted(
+        v for v in (_metrica(t, chiave) for t in tracce) if v is not None
+    )
+    if not valori:
+        return None
+    meta = len(valori) // 2
+    if len(valori) % 2:
+        return float(valori[meta])
+    return (valori[meta - 1] + valori[meta]) / 2
+
+
+#: Soglie sotto le quali uno scarto fra conteggi di token non viene
+#: riportato. Il conteggio oscilla anche a contenuto invariato, perche'
+#: dipende da come si segmentano gli identificativi di chiamata generati a
+#: caso: misurato, fino a trentatre' token su contenuto identico carattere
+#: per carattere. Riportare scarti di quell'ordine significherebbe
+#: annunciare rumore come risultato.
+SOGLIA_TOKEN_ASSOLUTA = 40
+SOGLIA_TOKEN_RELATIVA = 0.01
+
+
+def _rilevante(a: float, b: float) -> bool:
+    scarto = abs(b - a)
+    return scarto >= SOGLIA_TOKEN_ASSOLUTA and scarto >= SOGLIA_TOKEN_RELATIVA * a
 
 
 def raggruppa(
@@ -239,68 +287,88 @@ def sezione_costo(
 def sezione_divergenze(
     gruppi: dict[tuple[str, str, str], list[dict[str, Any]]], modello: str
 ) -> str:
-    """Dove i due bracci hanno fatto cose diverse.
+    """Dove i bracci hanno fatto cose diverse.
+
+    I confronti sono tre e rispondono a domande distinte: si veda
+    ``CONFRONTI``. Riportarne uno solo, o fonderli, farebbe perdere
+    l'informazione per cui i bracci sono tre.
 
     Si confrontano solo le tre metriche di comportamento, e solo sulle
     esecuzioni non compromesse dall'infrastruttura. Il confronto e' fra
     insiemi ordinati di valori e non fra medie: con tre ripetizioni una
     media renderebbe indistinguibili 2,2,2 e 1,2,3.
     """
-    voci = []
     compiti = sorted({c for (m, c, _) in gruppi if m == modello})
-    for compito in compiti:
-        usabili = {
-            braccio: [
-                t
-                for t in gruppi.get((modello, compito, braccio), [])
-                if t.get("status") not in INFRASTRUTTURALI
-            ]
-            for braccio in ARMS
-        }
-        if not all(usabili.values()):
-            continue
+    usabili = {
+        (compito, braccio): [
+            t
+            for t in gruppi.get((modello, compito, braccio), [])
+            if t.get("status") not in INFRASTRUTTURALI
+        ]
+        for compito in compiti
+        for braccio in ARMS
+    }
 
-        # Numeri diversi di esecuzioni utilizzabili rendono il confronto
-        # privo di senso: un braccio con due valori e uno con uno solo
-        # differiscono per costruzione, e segnalarlo come divergenza
-        # attribuirebbe all'approccio quello che e' stato un guasto di
-        # rete. Si dichiara la disparita' e si tace sulle metriche.
-        if len(usabili[ARMS[0]]) != len(usabili[ARMS[1]]):
-            voci.append(
-                f"- **{compito}**: non confrontabile, "
-                f"{len(usabili['mcp'])} esecuzioni utilizzabili per mcp contro "
-                f"{len(usabili['langchain'])} per langchain"
-            )
-            continue
-
-        for etichetta, chiave in (
-            ("iterazioni", "n_llm_calls"),
-            ("chiamate a strumento", "n_tool_calls"),
-            ("chiamate REST", "n_rest_calls"),
-        ):
-            valori = {
-                braccio: sorted(
-                    v
-                    for v in (_metrica(t, chiave) for t in usabili[braccio])
-                    if v is not None
-                )
-                for braccio in ARMS
-            }
-            if not all(valori.values()):
+    blocchi = []
+    for primo, secondo, spiegazione in CONFRONTI:
+        voci = []
+        for compito in compiti:
+            a, b = usabili[(compito, primo)], usabili[(compito, secondo)]
+            if not a or not b:
                 continue
-            if valori[ARMS[0]] != valori[ARMS[1]]:
+
+            # Numeri diversi di esecuzioni utilizzabili rendono il
+            # confronto privo di senso: due valori contro uno differiscono
+            # per costruzione, e segnalarlo come divergenza attribuirebbe
+            # all'approccio quello che e' stato un guasto di rete.
+            if len(a) != len(b):
                 voci.append(
-                    f"- **{compito}**, {etichetta}: "
-                    f"mcp {serie(valori['mcp'])} contro "
-                    f"langchain {serie(valori['langchain'])}"
+                    f"- **{compito}**: non confrontabile, {len(a)} esecuzioni "
+                    f"utilizzabili per {primo} contro {len(b)} per {secondo}"
+                )
+                continue
+
+            for etichetta, chiave in (
+                ("iterazioni", "n_llm_calls"),
+                ("chiamate a strumento", "n_tool_calls"),
+                ("chiamate REST", "n_rest_calls"),
+            ):
+                va = sorted(
+                    v for v in (_metrica(t, chiave) for t in a) if v is not None
+                )
+                vb = sorted(
+                    v for v in (_metrica(t, chiave) for t in b) if v is not None
+                )
+                if va and vb and va != vb:
+                    voci.append(
+                        f"- **{compito}**, {etichetta}: "
+                        f"{primo} {serie(va)} contro {secondo} {serie(vb)}"
+                    )
+
+            # I token in ingresso vanno trattati a parte. Le tre metriche
+            # sopra sono interi piccoli e si confrontano per uguaglianza;
+            # questi oscillano, quindi si confrontano le mediane e si
+            # riporta lo scarto solo quando supera il rumore. Senza questa
+            # voce il confronto fra ``mcp`` e ``mcp-conforme`` risulterebbe
+            # vuoto proprio nel caso che lo giustifica: stesso
+            # comportamento, contesto piu' costoso.
+            ma, mb = _mediana(a, "prompt_tokens"), _mediana(b, "prompt_tokens")
+            if ma is not None and mb is not None and _rilevante(ma, mb):
+                delta = mb - ma
+                voci.append(
+                    f"- **{compito}**, token in ingresso: {primo} {ma:.0f} "
+                    f"contro {secondo} {mb:.0f} "
+                    f"({delta:+.0f}, {delta / ma:+.1%})"
                 )
 
-    if not voci:
-        return (
-            "Nessuna. Su iterazioni, chiamate a strumento e chiamate REST i due\n"
-            "bracci hanno prodotto gli stessi valori in ogni compito.\n"
+        corpo = (
+            "\n".join(voci)
+            if voci
+            else "Nessuna: stessi valori in ogni compito."
         )
-    return "\n".join(voci) + "\n"
+        blocchi.append(f"**{primo} contro {secondo}** — {spiegazione}\n\n{corpo}\n")
+
+    return "\n".join(blocchi)
 
 
 def sezione_fallimenti(tracce: list[dict[str, Any]]) -> str:
