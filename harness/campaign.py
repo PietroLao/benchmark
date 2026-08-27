@@ -37,12 +37,12 @@ import asyncio
 import json
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import httpx
 
+from harness import summary
 from harness.trace import RunTrace
 from shared.env import ENV_PATH  # carica .env, se presente  # noqa: F401
 from shared.tasks import TASKS, TASKS_BY_ID, Task
@@ -194,21 +194,13 @@ async def main() -> int:
     elapsed = time.perf_counter() - started
     print(f"\nCompletata in {elapsed / 60:.1f} minuti. Tracce in {directory}")
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    (directory / f"_indice_{stamp}.json").write_text(
-        json.dumps(
-            {
-                "timestamp_utc": stamp,
-                "models": models,
-                "tasks": [t.task_id for t in tasks],
-                "repetitions": parsed.repetitions,
-                "arms": list(ARMS),
-                "planned": len(plan),
-                "executed_now": len(todo),
-            },
-            indent=2,
-        )
-    )
+    # Il riepilogo si genera qui, ma e' derivato: rileggendo le tracce si
+    # ricostruisce identico in qualunque momento, anche su una campagna
+    # interrotta a meta'. Sostituisce il vecchio indice, che riportava il
+    # piano di esecuzione e nessun risultato.
+    percorso = summary.scrivi(directory, {"planned": len(plan)})
+    if percorso is not None:
+        print(f"Riepilogo: {percorso}")
     return 0
 
 

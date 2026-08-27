@@ -69,9 +69,10 @@ uv run python -m harness.messages_gate --task t1_conteggio
 | 1 | Server strumentato, fixture, esperimento A | **completata** |
 | 2 | Host MCP standalone con LLM | **implementata**, da eseguire |
 | 3 | Braccio LangChain | **implementata**, da eseguire |
-| 4 | Parita' dell'input (gate) | **verde** su `tools` e su `messages` |
+| 4 | Parita' dell'input (gate) | **verde** su `tools`; da riscrivere su `messages` |
 | 5 | Caratterizzazione rumore `t_llm` | da fare |
 | 6 | Campagna completa | **implementata**, da eseguire |
+| 6b | Riepilogo leggibile della campagna | **implementata** |
 | 7 | Analisi e tabelle LaTeX | da fare |
 
 ## Struttura
@@ -87,6 +88,7 @@ arm_mcp/http_server.py   lo stesso server su trasporto Streamable HTTP
 arm_mcp/host.py          fase 2: host agentico autonomo (niente framework)
 arm_langchain/tools.py   strumenti LangChain derivati da tools_spec
 arm_langchain/agent.py   fase 3: agente ReAct + cattura della traccia
+arm_langchain/wire.py    intercetta il payload HTTP realmente trasmesso
 shared/nim.py            client per l'endpoint, usato dal solo host MCP
 shared/env.py            caricamento di .env (chiave API)
 harness/smoke_nim.py     fase 0: verifica del tool calling su NIM
@@ -94,8 +96,20 @@ harness/trace.py         registrazione integrale delle esecuzioni
 harness/schema_gate.py   fase 4a: parita' degli schemi (tools)
 harness/messages_gate.py fase 4b: parita' della conversazione (messages)
 harness/campaign.py      fase 6: campagna, bracci alternati e riprendibile
+harness/summary.py       fase 6b: riepilogo Markdown della campagna
 microbench/transport.py  esperimento A: overhead di trasporto, senza LLM
-results/                 un JSON per esecuzione
+results/                 un JSON per esecuzione, piu' il riepilogo
+```
+
+Le tracce servono a ricostruire un'esecuzione, non a leggerla: contengono i
+messaggi e gli schemi integrali. Il riepilogo estrae da un'intera cartella
+di tracce le sole grandezze su cui la tesi si pronuncia, con i due bracci
+su righe adiacenti e un valore per ogni ripetizione. Viene generato in coda
+alla campagna, ed e' rigenerabile in qualunque momento, anche su una
+campagna interrotta a meta':
+
+```bash
+uv run python -m harness.summary --dir results/campagna
 ```
 
 ## Requisiti
