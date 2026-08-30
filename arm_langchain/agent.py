@@ -83,6 +83,22 @@ def _messaggio_completo(message: BaseMessage) -> dict[str, Any]:
     return fuori
 
 
+def _finish_reason(generation: Any) -> str | None:
+    """Motivo per cui la generazione si e' fermata.
+
+    Si guardano entrambe le sedi: ``generation_info``, dove lo mettono
+    molte integrazioni, e ``response_metadata`` del messaggio, dove lo
+    mette ``ChatNVIDIA``.
+    """
+    if generation is None:
+        return None
+    valore = (getattr(generation, "generation_info", None) or {}).get("finish_reason")
+    if valore:
+        return valore
+    messaggio = getattr(generation, "message", None)
+    return (getattr(messaggio, "response_metadata", None) or {}).get("finish_reason")
+
+
 class TraceCallback(BaseCallbackHandler):
     """Registra nella traccia cio' che il framework fa internamente.
 
@@ -156,11 +172,15 @@ class TraceCallback(BaseCallbackHandler):
                         and hasattr(generation, "message")
                         else {}
                     ),
-                    "finish_reason": (
-                        (generation.generation_info or {}).get("finish_reason")
-                        if generation is not None
-                        else None
-                    ),
+                    # ``ChatNVIDIA`` non popola ``generation_info``: mette
+                    # ``finish_reason`` in ``response_metadata`` del
+                    # messaggio. Leggendo solo il primo si otteneva
+                    # ``None`` in ogni chiamata — ventiquattro su
+                    # ventiquattro in una campagna reale — e con esso si
+                    # perdeva l'unico modo di accorgersi che una risposta
+                    # e' stata troncata al limite di token, che l'host MCP
+                    # invece registra.
+                    "finish_reason": _finish_reason(generation),
                 }
             ],
             "usage": usage,

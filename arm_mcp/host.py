@@ -150,6 +150,16 @@ async def run_task(
                     "role": "assistant",
                     "content": message.get("content"),
                 }
+                # Le chiamate a strumento vanno riaccodate. Senza, il
+                # modello non vede mai di aver chiesto qualcosa: i
+                # messaggi di ruolo ``tool`` che seguono non si
+                # riferiscono ad alcuna richiesta visibile, e il modello
+                # riemette la stessa chiamata finche' non esaurisce le
+                # iterazioni. Misurato quando la riga mancava: 14
+                # iterazioni e 14 chiamate REST identiche su un compito
+                # che ne richiede quattro.
+                if tool_calls:
+                    canonico["tool_calls"] = tool_calls
                 messages.append(canonico)
 
                 if not tool_calls:
@@ -172,7 +182,18 @@ async def run_task(
                     result = await session.call_tool(fn["name"], args)
                     elapsed_ms = (time.perf_counter_ns() - start) / 1e6
 
-                    text = result.content[0].text if result.content else ""
+                    # Vanno concatenati **tutti** i blocchi, non il primo.
+                    # ``MCPServer`` scompone un valore di ritorno che sia
+                    # una lista in un blocco per elemento: ``list_events``
+                    # ne produce otto. Leggendo ``content[0]`` il modello
+                    # riceveva un evento su otto e rispondeva "1 evento",
+                    # il che spiegava quasi tutti gli esiti errati del
+                    # braccio. Il server di basso livello serializzava
+                    # invece tutto in un blocco solo, quindi il difetto
+                    # nasce con l'API di alto livello.
+                    text = "\n".join(
+                        b.text for b in (result.content or []) if hasattr(b, "text")
+                    )
                     trace.tool_call(
                         fn["name"],
                         args,
