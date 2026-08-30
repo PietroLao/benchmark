@@ -1,8 +1,9 @@
 """Prompt di sistema e compiti, definiti una sola volta per entrambi i bracci.
 
-Terzo punto di verità unica del banco di prova, accanto a
-``tools_spec`` (cosa il modello vede) e ``operations`` (cosa lo strumento
-fa): qui vive **cosa viene chiesto al modello**.
+Secondo punto di verità unica del banco di prova, accanto a
+``operations`` — che definisce cosa lo strumento fa, e da cui ciascun
+braccio deriva lo schema con la propria API: qui vive **cosa viene
+chiesto al modello**.
 
 Il prompt di sistema è condiviso deliberatamente. Nulla in MCP impone un
 certo prompt e nulla in LangChain lo vieta: è una scelta dello
@@ -12,7 +13,7 @@ indistinguibile da un effetto del protocollo. Il framework, di suo, non ne
 aggiunge alcuno — verificato: senza ``system_prompt`` esplicito
 ``create_agent`` invia al modello il solo messaggio dell'utente.
 
-I compiti sono sei: la valutazione è deliberatamente piccola, e serve a
+I compiti sono sette: la valutazione è deliberatamente piccola, e serve a
 osservare *come* i due bracci lavorano, non a coprire un dominio.
 
 Sono scelti in modo che il **numero di invocazioni non sia determinato
@@ -25,16 +26,28 @@ diverse, e su di essi il conteggio delle iterazioni misurava una
 proprietà del compito anziché dell'approccio. Un solo compito di quella
 forma è rimasto, come riferimento dichiarato.
 
-L'escursione viene da tre fonti distinte: una soluzione ottenibile per
-vie di lunghezza diversa (``t3``), un numero di operazioni che si scopre
-solo eseguendo (``t5``), e un'operazione che fallisce e va riconosciuta
-come tale (``t6``).
+L'escursione viene da tre fonti distinte: un numero di operazioni che si
+scopre solo eseguendo (``t5``), una differenza insiemistica che il modello
+deve calcolare prima di sapere quante operazioni servano (``t6``), e un
+identificativo che non esiste finche' l'agente non lo produce (``t7``).
+
+Nessun compito ripete la struttura di un altro, con una sola eccezione
+voluta: ``t3`` e ``t4`` usano gli stessi strumenti nello stesso numero e
+differiscono unicamente perche' nel secondo l'operazione fallisce. E' una
+coppia minima, e serve perche' qualunque scarto fra i due sia
+attribuibile all'errore e a nient'altro.
+
+``t4`` chiede un'iscrizione gia' esistente. **Se** i due bracci sappiano
+riprendersi da uno strumento che fallisce e' una differenza deterministica,
+che si stabilisce senza modello e vive in ``harness/error_paths.py``; qui
+si misura invece **come si comporta l'agente dopo l'errore**, e se il
+diverso testo che i due gli consegnano cambi qualcosa.
 
 La risposta attesa di ciascun compito è ricavabile dai dati di prova
 (``server/fixture.py``) ed è unica per costruzione: un solo evento a
 Cagliari, esattamente tre eventi in ottobre, ``svitale`` iscritta agli
-eventi 1 e 7, ``mrossi`` a tre eventi, ``lferrari`` già iscritta
-all'evento 3.
+eventi 1 e 7, ``mrossi`` ai tre eventi di ottobre, ``lferrari``
+all'evento 1 e a uno solo dei tre di ottobre.
 """
 
 from __future__ import annotations
@@ -166,48 +179,36 @@ TASKS: tuple[Task, ...] = (
         min_tool_calls=1,
     ),
     Task(
-        task_id="t2_filtro_temporale",
-        prompt="Quali eventi si tengono nel mese di ottobre? Elencane i titoli.",
-        rationale=(
-            "Una sola lettura, ma tre risultati attesi invece di uno e un "
-            "filtro su una data: verifica che il modello non si fermi al "
-            "primo elemento utile."
-        ),
-        expected=(
-            "Hackathon Open Source, Seminario di Reti Neurali, "
-            "Corso di Cloud Computing"
-        ),
-        must_contain=(
-            ("Hackathon",),
-            ("Reti Neurali",),
-            ("Cloud Computing",),
-        ),
-        min_tool_calls=1,
-    ),
-    Task(
-        task_id="t3_join_titoli",
+        task_id="t2_catena_lettura",
         prompt=(
-            "Quali sono i titoli degli eventi a cui e' iscritta l'utente "
-            "con username svitale?"
+            "Chi e' iscritto all'evento che si tiene a Cagliari? Riporta "
+            "nome ed email di ciascuno."
         ),
         rationale=(
-            "Mette davvero in relazione due entita': ``list_registrations`` "
-            "restituisce identificativi di evento, non titoli, e i titoli "
-            "stanno solo fra gli eventi. La lunghezza della soluzione non e' "
-            "fissata: i due titoli si possono ottenere con una sola "
-            "``list_events`` oppure con due ``get_event``, e quale via il "
-            "modello scelga e' una decisione sua. E' il primo compito in cui "
-            "il numero di invocazioni ha escursione."
+            "Tre letture obbligate su **tre strumenti diversi**, senza "
+            "scorciatoie: ``list_events`` per sapere quale evento sia quello "
+            "di Cagliari, ``list_registrations`` per sapere chi vi e' "
+            "iscritto, ``list_users`` per nome ed email. Nessuno strumento "
+            "restituisce due di questi tre livelli insieme. E' il compito "
+            "con il profilo piu' lungo fra quelli di sola lettura, ed e' "
+            "l'unico che eserciti ``list_users``."
+            "\n\n"
+            "Sostituisce un compito che chiedeva gli eventi di ottobre: "
+            "quello si risolveva con una sola ``list_events``, cioe' con lo "
+            "stesso strumento e lo stesso numero di iterazioni di ``t1``, e "
+            "non aggiungeva nulla alla misura."
         ),
-        expected=(
-            "Conferenza sull'Intelligenza Artificiale, "
-            "Convegno su Robotica Industriale"
+        expected="Laura Ferrari, Giulia Bianchi e Sara Vitale con le loro email",
+        must_contain=(
+            ("ferrari",),
+            ("bianchi",),
+            ("vitale",),
+            ("@example.it",),
         ),
-        must_contain=(("Intelligenza Artificiale",), ("Robotica",)),
-        min_tool_calls=2,
+        min_tool_calls=3,
     ),
     Task(
-        task_id="t4_catena_scrittura",
+        task_id="t3_catena_scrittura",
         prompt=(
             "Iscrivi Paolo Greco, username pgreco, email paolo.greco@example.it, "
             "all'evento che si tiene a Cagliari."
@@ -225,26 +226,7 @@ TASKS: tuple[Task, ...] = (
         state_total=12,
     ),
     Task(
-        task_id="t5_cancellazione_multipla",
-        prompt="Cancella tutte le iscrizioni dell'utente mrossi.",
-        rationale=(
-            "Il numero di invocazioni non e' deducibile dal testo della "
-            "richiesta: si scopre eseguendo la prima. ``mrossi`` risulta "
-            "iscritto a tre eventi, quindi la via piu' breve e' una lettura "
-            "e tre cancellazioni, ma un agente puo' legittimamente "
-            "rileggere per verificare. E' il compito con la maggiore "
-            "escursione sul numero di iterazioni, ed e' l'unico che eserciti "
-            "``delete_registration``."
-        ),
-        expected="le tre iscrizioni di mrossi (eventi 3, 4, 5) rimosse",
-        must_contain=(("cancellat", "eliminat", "rimoss"),),
-        min_tool_calls=4,
-        mutates_state=True,
-        state_absent=(("mrossi", None),),
-        state_total=8,
-    ),
-    Task(
-        task_id="t6_conflitto",
+        task_id="t4_conflitto",
         prompt=(
             "Iscrivi Laura Ferrari, username lferrari, "
             "email laura.ferrari@example.it, all'Hackathon Open Source."
@@ -252,15 +234,22 @@ TASKS: tuple[Task, ...] = (
         rationale=(
             "L'iscrizione richiesta esiste gia', quindi lo strumento "
             "fallisce e il compito si risolve riconoscendo il fallimento e "
-            "riferendolo, non riprovando. E' il solo compito in cui i due "
-            "bracci differiscono per meccanismo e non per involucro: MCP "
-            "segnala l'errore con ``isError`` sul risultato, mentre in "
-            "LangChain ``ToolNode`` intercetta l'eccezione e la consegna al "
-            "modello come contenuto di un messaggio di strumento. Il modello "
-            "vede quindi due cose diverse, e come reagisce e' precisamente "
-            "cio' che questo compito misura."
+            "riferendolo, non riprovando. Entrambi i bracci sono in grado "
+            "di riprendersi — il braccio LangChain dopo l'adattamento "
+            "documentato in ``harness/error_paths.py`` — quindi qui non si "
+            "misura *se* si riprendano, ma **come si comporta l'agente dopo "
+            "un errore**: se riferisca, se ritenti, se tenti una strada "
+            "diversa."
+            "\n\n"
+            "Resta una differenza in cio' che il modello legge, e non e' "
+            "stata pareggiata perche' appartiene ai due ecosistemi: l'SDK "
+            "MCP antepone ``Error executing tool <nome>:`` al messaggio, "
+            "LangChain lo consegna nudo. Se quel prefisso cambi il "
+            "comportamento e' osservabile solo con il modello nel ciclo, ed "
+            "e' la ragione per cui questo compito sta in campagna e non fra "
+            "i test deterministici."
         ),
-        expected="fallimento: lferrari e' gia' iscritta all'evento 3",
+        expected="fallimento riferito: lferrari e' gia' iscritta all'evento 3",
         must_contain=(
             ("lferrari", "laura"),
             # Le varianti con accento o apostrofo non servono: la
@@ -284,6 +273,87 @@ TASKS: tuple[Task, ...] = (
         mutates_state=True,
         state_present=(("lferrari", 3),),
         state_total=11,
+    ),
+    Task(
+        task_id="t5_cancellazione_multipla",
+        prompt="Cancella tutte le iscrizioni dell'utente mrossi.",
+        rationale=(
+            "Il numero di invocazioni non e' deducibile dal testo della "
+            "richiesta: si scopre eseguendo la prima. ``mrossi`` risulta "
+            "iscritto a tre eventi, quindi la via piu' breve e' una lettura "
+            "e tre cancellazioni, ma un agente puo' legittimamente "
+            "rileggere per verificare. E' il compito con la maggiore "
+            "escursione sul numero di iterazioni, ed e' l'unico che eserciti "
+            "``delete_registration``."
+        ),
+        expected="le tre iscrizioni di mrossi (eventi 3, 4, 5) rimosse",
+        must_contain=(("cancellat", "eliminat", "rimoss"),),
+        min_tool_calls=4,
+        mutates_state=True,
+        state_absent=(("mrossi", None),),
+        state_total=8,
+    ),
+    Task(
+        task_id="t6_iscrizione_condizionale",
+        prompt=(
+            "Iscrivi lferrari a tutti gli eventi di ottobre a cui non e' "
+            "gia' iscritta."
+        ),
+        rationale=(
+            "Il compito piu' esigente dell'insieme, e l'unico che unisca "
+            "ragionamento e scrittura. Richiede due letture di natura "
+            "diversa — quali eventi cadono in ottobre, a quali e' gia' "
+            "iscritta — e poi la loro differenza insiemistica, che il "
+            "modello deve calcolare da se': nessuno strumento la "
+            "restituisce. Quante iscrizioni servano non e' deducibile dal "
+            "testo, e ``lferrari`` e' scelta apposta perche' e' gia' "
+            "iscritta a uno dei tre eventi di ottobre: con qualunque altro "
+            "utente la risposta sarebbe 'tutti e tre' e l'esclusione non "
+            "verrebbe mai esercitata."
+            "\n\n"
+            "In analisi va controllato se il modello tenti l'iscrizione "
+            "all'evento 3. Sarebbe un errore suo di ragionamento, non del "
+            "compito, ma i due bracci vi reagiscono in modo opposto — si "
+            "veda ``harness/error_paths.py`` — e questo puo' toccare i "
+            "conteggi."
+        ),
+        expected="lferrari iscritta agli eventi 4 e 5",
+        must_contain=(("iscritt", "aggiunt", "registrat"),),
+        min_tool_calls=4,
+        mutates_state=True,
+        state_present=(("lferrari", 4), ("lferrari", 5)),
+        state_total=13,
+    ),
+    Task(
+        task_id="t7_creazione",
+        prompt=(
+            "Crea un evento intitolato 'Seminario di Basi di Dati', che si "
+            "tiene a Quartu Sant'Elena il 15 giugno 2026 alle 18:00, con "
+            "descrizione 'Introduzione ai database relazionali'. Poi "
+            "iscrivici Andrea Conti, username aconti, email "
+            "andrea.conti@example.it."
+        ),
+        rationale=(
+            "Due cose che nessun altro compito richiede. L'identificativo da "
+            "passare alla seconda chiamata non viene **letto** ma "
+            "**prodotto**: e' l'evento appena creato, e non esiste prima che "
+            "l'agente lo crei — in ``t3`` l'identificativo si scopre "
+            "interrogando, qui si ottiene da una scrittura. E gli argomenti "
+            "non sono ne' copiati dalla richiesta ne' letti da un risultato: "
+            "la data va **sintetizzata** nel formato che lo strumento "
+            "dichiara, partendo da 'il 15 giugno 2026 alle 18:00'."
+            "\n\n"
+            "E' quindi anche l'unico compito in cui la qualita' della "
+            "descrizione dello schema incide direttamente sull'esito, il che "
+            "lo collega alla misura di ``harness/schema_gate.py``. Unico a "
+            "esercitare ``create_event``."
+        ),
+        expected="evento 9 creato, aconti iscritto",
+        must_contain=(("creat",), ("iscritt", "registrat", "aggiunt")),
+        min_tool_calls=2,
+        mutates_state=True,
+        state_present=(("aconti", 9),),
+        state_total=12,
     ),
 )
 

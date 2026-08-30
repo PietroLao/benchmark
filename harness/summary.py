@@ -39,28 +39,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from harness.trace import tentativi_falliti
+
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
-ARMS = ("mcp", "mcp-conforme", "langchain")
+ARMS = ("mcp", "langchain")
 
-#: I confronti che hanno significato, con cio' che ciascuno isola. Non
-#: sono tre modi di guardare lo stesso dato: rispondono a domande diverse,
-#: e nella tesi vanno riportati come risultati distinti.
+#: L'unico confronto, e cio' che isola. Resta in forma di tabella perche'
+#: il disegno ha gia' ospitato piu' condizioni e potrebbe ospitarne
+#: ancora.
 CONFRONTI: tuple[tuple[str, str, str], ...] = (
     (
-        "mcp-conforme",
-        "langchain",
-        "isola il meccanismo: stesso contesto, integrazione diversa",
-    ),
-    (
         "mcp",
         "langchain",
-        "cio' che si ottiene in pratica, senza pareggiare nulla",
-    ),
-    (
-        "mcp",
-        "mcp-conforme",
-        "attribuisce lo scarto alla gestione del contesto del framework",
+        "i due approcci, ciascuno nella forma idiomatica del proprio ecosistema",
     ),
 )
 
@@ -96,6 +88,19 @@ def _metrica(traccia: dict[str, Any], chiave: str) -> Any:
 
 def _rep(traccia: dict[str, Any]) -> int:
     return (traccia.get("config") or {}).get("repetition") or 0
+
+
+def _falliti(traccia: dict[str, Any], chiave: str) -> Any:
+    """Legge un dato sui tentativi a vuoto **ricalcolandolo dagli eventi**.
+
+    Non si usa il valore in ``metrics``: le tracce scritte prima della
+    correzione contengono un ``n_retries`` che ignorava i timeout, e una
+    di esse riportava zero ritentativi per un'esecuzione durata dodici
+    minuti. Gli eventi, invece, sono sempre stati registrati per intero,
+    quindi ricalcolare qui rende corrette anche le tracce vecchie senza
+    doverle rieseguire.
+    """
+    return tentativi_falliti(traccia.get("events") or []).get(chiave)
 
 
 def _mediana(tracce: list[dict[str, Any]], chiave: str) -> float | None:
@@ -259,12 +264,33 @@ def sezione_costo(
     l'attesa dell'endpoint remoto, che dipende dal suo carico e non dal
     braccio: e' contesto, non un risultato, e va letta insieme ai
     ritentativi che la producono.
+
+    ``persi s`` e' il tempo speso in tentativi andati a vuoto, che ``lat.
+    LLM`` non contiene perche' quella somma i soli tentativi riusciti.
+    Senza questa colonna un'esecuzione durata dodici minuti di orologio
+    comparirebbe in tabella con sei secondi di latenza, come e' accaduto.
+
+    Le esecuzioni interrotte da guasti dell'infrastruttura sono escluse:
+    i loro conteggi sono parziali senza dichiararlo. Compaiono nella
+    tabella del comportamento, dove la colonna degli esiti le rende
+    visibili, e nell'elenco in fondo.
     """
     righe = []
     compiti = sorted({c for (m, c, _) in gruppi if m == modello})
     for compito in compiti:
         for braccio in ARMS:
-            tracce = gruppi.get((modello, compito, braccio), [])
+            # Si escludono le esecuzioni interrotte da guasti. I loro
+            # conteggi sono parziali e non lo dichiarano: una traccia con
+            # due interrogazioni di cui la seconda andata in timeout somma
+            # i token della sola prima, e il totale sembra completo.
+            # Osservato: 579 token accanto ai 1668 degli altri bracci, che
+            # avrebbe suggerito un consumo tre volte inferiore laddove
+            # l'esecuzione era semplicemente morta a meta'.
+            tracce = [
+                t
+                for t in gruppi.get((modello, compito, braccio), [])
+                if t.get("status") not in INFRASTRUTTURALI
+            ]
             if not tracce:
                 continue
             righe.append(
@@ -274,12 +300,24 @@ def sezione_costo(
                     token(tracce, "prompt_tokens"),
                     token(tracce, "completion_tokens"),
                     serie_arrotondata([_metrica(t, "latency_tools_ms") for t in tracce]),
-                    serie([_metrica(t, "n_retries") for t in tracce]),
+                    serie([_falliti(t, "n_retries") for t in tracce]),
+                    serie_arrotondata(
+                        [_falliti(t, "latency_retries_s") for t in tracce], 0
+                    ),
                     serie_arrotondata([_metrica(t, "latency_llm_s") for t in tracce]),
                 ]
             )
     return tabella(
-        ["compito", "braccio", "tok in", "tok out", "dispatch ms", "ritent.", "lat. LLM s"],
+        [
+            "compito",
+            "braccio",
+            "tok in",
+            "tok out",
+            "dispatch ms",
+            "ritent.",
+            "persi s",
+            "lat. LLM s",
+        ],
         righe,
     )
 
@@ -349,9 +387,10 @@ def sezione_divergenze(
             # sopra sono interi piccoli e si confrontano per uguaglianza;
             # questi oscillano, quindi si confrontano le mediane e si
             # riporta lo scarto solo quando supera il rumore. Senza questa
-            # voce il confronto fra ``mcp`` e ``mcp-conforme`` risulterebbe
-            # vuoto proprio nel caso che lo giustifica: stesso
-            # comportamento, contesto piu' costoso.
+            # voce, due bracci che si comportano in modo identico ma
+            # presentano al modello un contesto di costo diverso —
+            # schemi derivati diversamente, ragionamento rimandato da un
+            # lato solo — risulterebbero indistinguibili.
             ma, mb = _mediana(a, "prompt_tokens"), _mediana(b, "prompt_tokens")
             if ma is not None and mb is not None and _rilevante(ma, mb):
                 delta = mb - ma

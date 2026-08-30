@@ -38,7 +38,15 @@ from arm_mcp.server import server
 #: chiamate misurate sono richiesta-risposta singole, e lo stream
 #: aggiungerebbe alla misura un costo di framing che nessuno dei due
 #: bracci paga in esercizio.
-session_manager = StreamableHTTPSessionManager(app=server, json_response=True)
+#: Il gestore di sessioni vuole il server di basso livello, che
+#: ``MCPServer`` avvolge. Si potrebbe usare ``server.streamable_http_app()``,
+#: ma quello sceglie per conto proprio percorso, modalita' di risposta e
+#: gestione dello stato: qui restano espliciti, perche' l'esperimento A ha
+#: misurato questa esatta configurazione e cambiarla renderebbe le misure
+#: non confrontabili con quelle gia' raccolte.
+session_manager = StreamableHTTPSessionManager(
+    app=server._lowlevel_server, json_response=True
+)
 
 
 async def handle(scope: Scope, receive: Receive, send: Send) -> None:

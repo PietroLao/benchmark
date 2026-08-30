@@ -1,64 +1,88 @@
-"""Braccio LangChain — costruzione degli strumenti da ``TOOL_SPECS``.
+"""Braccio LangChain — strumenti costruiti con il decoratore ``@tool``.
 
-Gli strumenti sono ``StructuredTool`` costruiti passando **direttamente**
-lo schema JSON di ``shared/tools_spec.py`` come ``args_schema``, anziche'
-derivandolo da un modello Pydantic o dalle annotazioni della funzione.
+E' l'API di alto livello, quella che si usa nella pratica: si passa la
+funzione, e il framework ne deriva lo schema dalle annotazioni di tipo e
+dalla docstring.
 
-La scelta e' deliberata e ha una conseguenza non ovvia, verificata
-sperimentalmente:
+Non c'e' piu' alcuno schema scritto a mano. Passarne uno — com'era prima,
+sotto forma di dizionario in ``args_schema`` — otteneva che i due bracci
+presentassero al modello schemi identici byte per byte, ma al prezzo di
+non esercitare mai la generazione di schemi propria di LangChain, che e'
+esattamente la parte che chi adotta il framework usa davvero.
 
-* con ``args_schema`` come **dizionario**, lo schema che LangChain invia
-  al modello e' letteralmente quello di ``TOOL_SPECS``, e gli argomenti
-  arrivano alla funzione **non convertiti**;
-* con ``args_schema`` come **modello Pydantic**, LangChain converte i tipi
-  al confine dello strumento (``"1"`` diventa ``1``) ma lo schema inviato
-  al modello e' rigenerato da Pydantic, quindi puo' divergere dal nostro.
+La conseguenza va enunciata: i due bracci possono ora presentare al
+modello schemi **diversi**, e la differenza non e' rumore da eliminare ma
+una proprieta' dei due ecosistemi. ``harness/schema_gate.py`` non la
+verifica piu', la misura.
 
-Per il confronto serve la prima: se i due bracci presentassero al modello
-schemi diversi, le differenze misurate non sarebbero piu' attribuibili al
-protocollo. La conversione dei tipi resta comunque garantita, perche'
-entrambi i bracci invocano ``operations.call``, che applica
-``coerce_arguments``.
+Le funzioni sono quelle di ``shared/operations.py``, unica
+implementazione delle chiamate REST: i bracci differiscono per come lo
+strumento viene esposto, mai per cosa lo strumento fa. Vengono
+registrate **sincrone**, come sono, in entrambi i bracci: qualunque cosa
+ciascun ecosistema faccia per invocarle da un contesto asincrono fa parte
+di cio' che si sta misurando, e sceglierla noi la nasconderebbe.
 
-Il fatto stesso e' un risultato da riportare in §3.2: la validazione degli
-argomenti che LangChain sembra offrire gratuitamente si ottiene solo
-definendo gli strumenti con modelli Pydantic; definirli dallo schema JSON
-grezzo — necessario per garantire la parita' con un server MCP — vi
-rinuncia. Non e' quindi una differenza fra i due approcci, ma una scelta
-interna a LangChain.
+Gli errori richiedono un adattamento, ed e' esso stesso una misura.
+Perche' l'agente possa riprendersi da uno strumento che fallisce, invece
+di terminare, servono **due** condizioni insieme, verificate:
+
+* lo strumento deve sollevare ``ToolException`` — l'eccezione del
+  framework: una qualunque altra viene rilanciata e uccide l'esecuzione;
+* lo strumento deve avere ``handle_tool_error`` a vero, che non e' il
+  valore predefinito.
+
+Ne manca una e l'esecuzione termina. ``create_agent`` non espone alcun
+parametro per la seconda, e il gestore predefinito del suo ``ToolNode``
+restituisce al modello i soli errori di *invocazione*, rilanciando tutto
+cio' che lo strumento solleva al proprio interno.
+
+Il costo di quell'adattamento e' il dato: per rendere ripristinabile uno
+strumento, LangChain chiede che la logica applicativa importi un tipo di
+eccezione del framework. ``shared/operations.py`` resta percio' agnostico
+e solleva ``OperationError``; la conversione avviene qui, in un involucro
+che appartiene al braccio. Il server MCP non ha bisogno di nulla di
+simile: traduce qualunque eccezione in un risultato con ``isError``, e il
+codice dello strumento ignora l'esistenza del protocollo. Il confronto fra
+le due vie sta in ``harness/error_paths.py``.
 """
 
 from __future__ import annotations
 
-from typing import Any
+import functools
+from typing import Any, Callable
 
-from langchain_core.tools import StructuredTool
+from langchain_core.tools import BaseTool, ToolException, tool
 
-from shared import operations
-from shared.tools_spec import TOOL_SPECS
-
-
-def make_tool(name: str, description: str, schema: dict[str, Any]) -> StructuredTool:
-    """Costruisce un singolo strumento che inoltra a ``operations.call``."""
-
-    async def _run(**kwargs: Any) -> Any:
-        return operations.call(name, kwargs)
-
-    return StructuredTool.from_function(
-        coroutine=_run,
-        name=name,
-        description=description,
-        args_schema=schema,
-    )
+from shared.operations import TOOL_FUNCTIONS, OperationError
 
 
-def build_tools() -> list[StructuredTool]:
-    """Costruisce gli strumenti LangChain a partire dalle specifiche condivise.
+def _ripristinabile(funzione: Callable[..., Any]) -> Callable[..., Any]:
+    """Converte ``OperationError`` in ``ToolException``.
 
-    ``_bench_echo`` non compare: e' visibile solo al microbenchmark, che
-    lo costruisce per conto proprio.
+    ``functools.wraps`` non e' cosmetico: ``@tool`` deriva lo schema con
+    ``inspect.signature``, che segue ``__wrapped__``. Senza, l'involucro
+    presenterebbe al modello ``(*args, **kwargs)`` e lo schema andrebbe
+    perduto.
     """
-    return [make_tool(s.name, s.description, s.input_schema) for s in TOOL_SPECS]
+
+    @functools.wraps(funzione)
+    def _run(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return funzione(*args, **kwargs)
+        except OperationError as exc:
+            raise ToolException(str(exc)) from exc
+
+    return _run
+
+
+def build_tools() -> list[BaseTool]:
+    """Costruisce gli strumenti lasciando dedurre lo schema a LangChain."""
+    strumenti = []
+    for funzione in TOOL_FUNCTIONS:
+        strumento = tool(_ripristinabile(funzione))
+        strumento.handle_tool_error = True
+        strumenti.append(strumento)
+    return strumenti
 
 
 TOOLS_BY_NAME = {t.name: t for t in build_tools()}

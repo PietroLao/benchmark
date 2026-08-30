@@ -164,8 +164,12 @@ def chat(
         delay = min(2**attempt, 30)
         if trace is not None:
             trace.event(
-                "retry", status_code=response.status_code, backoff_s=delay,
-                attempt=attempt + 1,
+                "retry", status_code=response.status_code,
+                # Anche qui va registrato il tempo speso: senza, il costo
+                # di orologio di un ritentativo per errore HTTP resterebbe
+                # invisibile, mentre quello per timeout no. Le due categorie
+                # devono essere sommabili fra loro.
+                elapsed_s=elapsed, backoff_s=delay, attempt=attempt + 1,
             )
         time.sleep(delay)
 

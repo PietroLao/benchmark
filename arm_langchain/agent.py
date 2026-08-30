@@ -1,8 +1,9 @@
 """Fase 3 — agente ReAct LangChain.
 
 E' il braccio LangChain dell'esperimento con il modello: gli strumenti
-sono ``StructuredTool`` costruiti da ``tools_spec``, il ciclo e' quello
-di ``create_agent``, e il modello e' raggiunto tramite ``ChatNVIDIA``.
+sono costruiti con ``@tool``, che ne deriva lo schema dalla firma, il
+ciclo e' quello di ``create_agent``, e il modello e' raggiunto tramite
+``ChatNVIDIA``.
 
 Il prompt di sistema, i compiti e il limite di iterazioni provengono da
 ``shared.tasks``, gli stessi che usa l'host MCP. E' la condizione perche'
@@ -17,7 +18,7 @@ confrontabili.
 
 Uso::
 
-    uv run python -m arm_langchain.agent --task t3_join_titoli
+    uv run python -m arm_langchain.agent --task t6_iscrizione_condizionale
 """
 
 from __future__ import annotations
@@ -201,7 +202,7 @@ class TraceCallback(BaseCallbackHandler):
         )
 
 
-def _modello_con_ritentativi(base_cls: type) -> type:
+def _modello_con_ritentativi(base_cls: type, trace: RunTrace) -> type:
     """Crea una sottoclasse di ``ChatNVIDIA`` con ritentativi e chiamate
     a strumento serializzate.
 
@@ -210,6 +211,13 @@ def _modello_con_ritentativi(base_cls: type) -> type:
     ``bind_tools``: ``create_agent`` non potrebbe piu' collegargli gli
     strumenti. La sottoclasse eredita tutto e resta un modello a tutti
     gli effetti.
+
+    I ritentativi vengono **registrati nella traccia** con gli stessi nomi
+    di evento che usa ``shared/nim.py``. Senza, la colonna dei ritentativi
+    del riepilogo mostrerebbe zero per questo braccio qualunque cosa
+    accada, perche' il ciclo di ritentativo vive sotto il livello dei
+    callback e non emerge altrove: il confronto fra i bracci su quella
+    colonna sarebbe falso, non incompleto.
     """
 
     class ChatNVIDIARobusto(base_cls):  # type: ignore[misc, valid-type]
@@ -218,12 +226,25 @@ def _modello_con_ritentativi(base_cls: type) -> type:
             # un 500 le risposte che ne contengono piu' di una.
             kwargs.setdefault("parallel_tool_calls", False)
             for attempt in range(MAX_ATTEMPTS_LC):
+                inizio = time.perf_counter()
                 try:
                     return await super()._agenerate(*args, **kwargs)
                 except Exception as exc:  # noqa: BLE001
+                    trascorso = time.perf_counter() - inizio
                     if not _e_transitorio(exc) or attempt == MAX_ATTEMPTS_LC - 1:
                         raise
-                    await asyncio.sleep(min(2**attempt, 30))
+                    attesa = min(2**attempt, 30)
+                    testo = str(exc)
+                    trace.event(
+                        "retry_timeout"
+                        if any(s in testo for s in ("Timeout", "timeout"))
+                        else "retry",
+                        detail=f"{type(exc).__name__}: {testo[:200]}",
+                        elapsed_s=trascorso,
+                        backoff_s=attesa,
+                        attempt=attempt + 1,
+                    )
+                    await asyncio.sleep(attesa)
             raise AssertionError("irraggiungibile")
 
     return ChatNVIDIARobusto
@@ -276,7 +297,7 @@ async def run_task(
         "tool_choice": "auto",
         "parallel_tool_calls": False,
     }
-    llm = _modello_con_ritentativi(ChatNVIDIA)(
+    llm = _modello_con_ritentativi(ChatNVIDIA, trace)(
         model=model, temperature=params["temperature"],
         max_completion_tokens=params["max_completion_tokens"],
     )

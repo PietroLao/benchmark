@@ -84,7 +84,6 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
-from arm_langchain.tools import make_tool
 from shared import operations
 
 BENCH_ROOT = Path(__file__).resolve().parent.parent
@@ -101,16 +100,6 @@ MCP_HTTP_URL = os.environ.get("BENCH_MCP_HTTP_URL", "http://127.0.0.1:8100/mcp/"
 OPERATIONS: dict[str, tuple[str, dict[str, Any]]] = {
     "echo": ("_bench_echo", {"payload": "ping"}),
     "list_events": ("list_events", {}),
-}
-
-#: Lo strumento fittizio non compare in ``TOOL_SPECS``: il braccio
-#: LangChain lo costruisce qui, con lo stesso schema che il server MCP
-#: pubblica sotto ``BENCH_EXPOSE_ECHO``, cosi' che le due condizioni
-#: misurino davvero la stessa cosa.
-_ECHO_SCHEMA = {
-    "type": "object",
-    "properties": {"payload": {"type": "string"}},
-    "required": [],
 }
 
 Caller = Callable[[str, dict[str, Any]], Awaitable[Any]]
@@ -159,14 +148,17 @@ def _build_langchain_caller() -> Caller:
     artefatto della misura, e va quindi misurato nella forma in cui
     verra' effettivamente pagato.
     """
-    from arm_langchain.tools import TOOLS_BY_NAME
+    from langchain_core.tools import tool as _tool
+
+    from arm_langchain.tools import TOOLS_BY_NAME, _ripristinabile
 
     tools = dict(TOOLS_BY_NAME)
-    tools["_bench_echo"] = make_tool(
-        "_bench_echo",
-        "Strumento di misura interno: restituisce l'argomento ricevuto.",
-        _ECHO_SCHEMA,
-    )
+    # Lo strumento fittizio si costruisce nello stesso modo di quelli
+    # reali — decoratore ``@tool`` sulla funzione, schema dedotto — perche'
+    # la condizione misurata deve essere la stessa che paga il braccio.
+    echo = _tool(_ripristinabile(operations._bench_echo))
+    echo.handle_tool_error = True
+    tools["_bench_echo"] = echo
 
     async def _call(tool: str, args: dict[str, Any]) -> Any:
         return await tools[tool].ainvoke(args)

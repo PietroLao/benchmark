@@ -63,6 +63,36 @@ def _clean(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def tentativi_falliti(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Conta i tentativi andati a vuoto e il tempo che sono costati.
+
+    Sta qui come funzione libera, e non come metodo, perché serve anche a
+    ricalcolare le metriche di tracce già salvate: gli eventi ci sono
+    sempre, quindi una traccia scritta da una versione precedente si
+    corregge rileggendola, senza rieseguire nulla.
+
+    Si contano **entrambe** le forme di ritentativo. Contarne una sola era
+    un difetto reale: ``shared/nim.py`` registra ``retry`` per gli errori
+    HTTP e ``retry_timeout`` per i timeout, e la metrica guardava soltanto
+    la prima. Osservato su una traccia vera: tre timeout da 240 s, dodici
+    minuti di orologio, e la metrica riportava zero ritentativi.
+
+    ``latency_retries_s`` è tempo che l'esecuzione ha speso senza
+    ottenere nulla: il tentativo fallito più l'attesa prima del
+    successivo. Va tenuto distinto da ``latency_llm_s``, che somma i soli
+    tentativi riusciti ed è la latenza del modello; sommarli
+    confonderebbe la lentezza dell'endpoint con quella della risposta.
+    """
+    falliti = [e for e in events if str(e.get("kind", "")).startswith("retry")]
+    return {
+        "n_retries": len(falliti),
+        "n_timeouts": sum(1 for e in falliti if e.get("kind") == "retry_timeout"),
+        "latency_retries_s": sum(
+            (e.get("elapsed_s") or 0) + (e.get("backoff_s") or 0) for e in falliti
+        ),
+    }
+
+
 def _slug(text: str) -> str:
     """Riduce una stringa a una forma sicura per un nome di file."""
     return re.sub(r"[^a-zA-Z0-9._-]+", "-", text).strip("-")[:60]
@@ -216,7 +246,7 @@ class RunTrace:
             "tokens_reported_by_endpoint": bool(prompt_tok),
             "chars_sent": chars_in,
             "chars_received": chars_out,
-            "n_retries": sum(1 for e in self.events if e["kind"] == "retry"),
+            **tentativi_falliti(self.events),
             "status": self.status,
         }
 

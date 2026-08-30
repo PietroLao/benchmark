@@ -1,14 +1,7 @@
 """Fase 6 — esecuzione della campagna di misura.
 
-Esegue i compiti con tutti i bracci, su uno o piu' modelli, ripetendo
+Esegue i compiti con entrambi i bracci, su uno o piu' modelli, ripetendo
 ciascuna combinazione, e salva una traccia per esecuzione.
-
-I bracci sono tre e non due. ``mcp-conforme`` pareggia il contesto
-presentato al modello e permette di attribuire al meccanismo le
-differenze osservate; ``mcp`` e' la forma che si scriverebbe davvero, e il
-confronto fra i due misura quanto costa la gestione del contesto di
-LangChain. Con due soli bracci quel costo restava invisibile, perche'
-l'avevamo soppresso proprio per ottenere la parita'.
 
 Tre discipline governano l'ordine, e nessuna e' cosmetica.
 
@@ -21,7 +14,7 @@ troncamento delle risposte, quindi puo' toccare il numero di iterazioni,
 che e' una delle metriche rivendicate. Eseguire un braccio di mattina e
 l'altro di sera non sarebbe rumore ma un fattore confondente.
 
-**L'ordine ruota** a ogni cella, cosi' che nessuno dei tre paghi
+**L'ordine ruota** a ogni cella, cosi' che nessuno dei due paghi
 sistematicamente il costo di essere sempre il primo o l'ultimo.
 
 **Lo stato viene ripristinato prima di ogni esecuzione**, non solo prima
@@ -57,13 +50,8 @@ from shared.tasks import TASKS, TASKS_BY_ID, Task
 BENCH_URL = "http://127.0.0.1:8000/__bench__"
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
-#: I tre bracci. ``mcp-conforme`` non e' una variante di comodo: e' la
-#: condizione che pareggia il contesto presentato al modello, senza la
-#: quale le differenze osservate non sarebbero attribuibili al meccanismo.
-#: ``mcp`` e' la forma che si scriverebbe davvero. Lo scarto fra i due
-#: misura quanto costa la gestione del contesto di LangChain, che con due
-#: soli bracci sarebbe rimasta invisibile perche' l'avevamo soppressa.
-ARMS = ("mcp", "mcp-conforme", "langchain")
+#: I due bracci, ciascuno nella forma idiomatica del proprio ecosistema.
+ARMS = ("mcp", "langchain")
 
 
 def _reset_state() -> None:
@@ -88,10 +76,10 @@ async def run_one(arm: str, task: Task, model: str, repetition: int) -> RunTrace
     """Esegue una singola combinazione e restituisce la traccia."""
     _reset_state()
 
-    if arm in ("mcp", "mcp-conforme"):
+    if arm == "mcp":
         from arm_mcp.host import run_task as run_mcp
 
-        trace = await run_mcp(task, model=model, conforme=arm == "mcp-conforme")
+        trace = await run_mcp(task, model=model)
     else:
         from arm_langchain.agent import run_task as run_lc
 
@@ -135,12 +123,11 @@ def build_plan(
     """Costruisce l'ordine di esecuzione.
 
     Entro ogni cella i bracci sono consecutivi, cosi' che incontrino lo
-    stesso stato dell'endpoint. L'ordine **ruota** a ogni cella invece di
-    invertirsi: con tre bracci l'inversione produrrebbe due soli ordini su
-    sei, e uno dei tre resterebbe sempre in posizione centrale. La
-    rotazione fa occupare a ciascuno ogni posizione un terzo delle volte,
-    che e' quanto serve perche' nessuno paghi sistematicamente il costo di
-    essere il primo o l'ultimo.
+    stesso stato dell'endpoint. L'ordine **ruota** a ogni cella, cosi' che
+    ciascun braccio occupi ogni posizione lo stesso numero di volte e
+    nessuno paghi sistematicamente il costo di essere il primo o l'ultimo.
+    Con due bracci la rotazione coincide con l'alternanza; resta scritta
+    in forma generale perche' regge anche un terzo braccio.
     """
     plan: list[tuple[str, Task, str, int]] = []
     cella = 0

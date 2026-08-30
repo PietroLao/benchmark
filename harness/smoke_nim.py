@@ -11,7 +11,7 @@ Verifica quattro cose:
 1. l'endpoint risponde e il modello e' raggiungibile;
 2. il modello emette ``tool_calls`` invece di descrivere a parole cosa
    farebbe, usando **gli schemi reali del benchmark**, non un esempio
-   giocattolo: e' anche una validazione anticipata di ``tools_spec``;
+   giocattolo: e' anche una validazione anticipata degli schemi;
 3. sa estrarre correttamente gli argomenti da una richiesta in italiano;
 4. chiude il giro, cioe' produce una risposta finale quando gli si
    restituisce il risultato dello strumento.
@@ -45,7 +45,21 @@ import httpx
 
 from harness.trace import RunTrace
 from shared.env import ENV_PATH  # carica .env, se presente  # noqa: F401
-from shared.tools_spec import openai_tools_format
+from langchain_core.utils.function_calling import convert_to_openai_tool
+
+from arm_langchain.tools import build_tools
+
+
+def openai_tools_format() -> list[dict]:
+    """Gli strumenti nel formato dell'API OpenAI.
+
+    Derivati dal braccio LangChain, che non e' una preferenza: questa e'
+    una verifica preliminare che il tool calling funzioni sull'endpoint,
+    e le va bene una qualunque delle due vie. Dopo il passaggio alle API
+    di alto livello non esiste piu' una definizione degli schemi
+    indipendente dai bracci, ed e' giusto cosi'.
+    """
+    return [convert_to_openai_tool(t) for t in build_tools()]
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
@@ -98,7 +112,7 @@ retries_observed: list[tuple[int, float]] = []
 #: Scostamenti fra gli argomenti attesi e quelli emessi dal modello.
 #: Vanno registrati perche' documentano un comportamento deterministico
 #: del modello (i numeri restituiti come stringhe) che motiva
-#: ``tools_spec.coerce_arguments``.
+#: la validazione degli argomenti dell'API di alto livello.
 anomalies: list[dict[str, Any]] = []
 
 
@@ -198,7 +212,7 @@ def main() -> int:
     tools = openai_tools_format()
     print(f"Endpoint : {BASE_URL}")
     print(f"Modello  : {MODEL}")
-    print(f"Strumenti: {len(tools)} (da shared/tools_spec.py)\n")
+    print(f"Strumenti: {len(tools)} (schemi derivati da @tool)\n")
 
     latencies: list[float] = []
     failures = 0

@@ -1,16 +1,21 @@
-"""Fase 4 (parte statica) — gate sulla parita' degli schemi.
+"""Misura delle differenze fra gli schemi che i due bracci pubblicano.
 
-Verifica che i due bracci presentino al modello **gli stessi identici
-byte** nel campo ``tools`` della richiesta a ``/v1/chat/completions``.
+Era un gate: verificava che i due bracci presentassero al modello gli
+stessi identici byte nel campo ``tools``, e falliva altrimenti. Poteva
+farlo perche' entrambi derivavano da una definizione scritta a mano.
 
-Il confronto non e' fatto sulle definizioni in memoria — sarebbero uguali
-per costruzione, visto che entrambe derivano da ``TOOL_SPECS`` — ma sul
-percorso reale del braccio MCP: ``types.Tool`` viene serializzato in
-JSON-RPC, trasmesso, deserializzato dal client e infine convertito nel
-formato OpenAI. E' in quel giro che possono comparire campi aggiunti dal
-modello Pydantic dell'SDK (``title``, ``annotations``, ``outputSchema``)
-o riordini, cioe' esattamente la deriva che il gate esiste per
-intercettare.
+Ora ciascun braccio lascia derivare lo schema alla propria API di alto
+livello — ``MCPServer.tool()`` da un lato, ``@tool`` dall'altro — che e'
+il modo in cui questi strumenti vengono scritti nella pratica. I due
+schemi possono quindi differire, e **devono poter differire**: la
+differenza e' una proprieta' dei due ecosistemi, ed e' un risultato per
+il capitolo sull'overhead di implementazione.
+
+Questo modulo la riporta invece di bocciarla. Il confronto resta fatto
+sul percorso reale del braccio MCP — ``types.Tool`` serializzato in
+JSON-RPC, trasmesso, deserializzato e convertito nel formato OpenAI — e
+non su definizioni in memoria, perche' e' in quel giro che compaiono i
+campi aggiunti dal modello Pydantic dell'SDK.
 
 Uso::
 
@@ -31,7 +36,6 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from arm_langchain.tools import build_tools
-from shared.tools_spec import openai_tools_format
 
 MCP_HTTP_URL = os.environ.get("BENCH_MCP_HTTP_URL", "http://127.0.0.1:8100/mcp/")
 
@@ -96,32 +100,26 @@ async def main() -> int:
         return 1
 
     lc_tools = collect_langchain()
-    ref_tools = openai_tools_format()
 
     print(f"strumenti da MCP (tools/list) : {len(mcp_tools)}")
-    print(f"strumenti da LangChain        : {len(lc_tools)}")
-    print(f"riferimento (TOOL_SPECS)      : {len(ref_tools)}\n")
+    print(f"strumenti da LangChain        : {len(lc_tools)}\n")
 
-    mcp_s, lc_s, ref_s = _canonical(mcp_tools), _canonical(lc_tools), _canonical(ref_tools)
-
-    failures = 0
-    for label, produced in (("MCP", mcp_s), ("LangChain", lc_s)):
-        if produced == ref_s:
-            print(f"{OK} {label} coincide con TOOL_SPECS")
-        else:
-            failures += 1
-            print(f"{KO} {label} DIFFERISCE da TOOL_SPECS")
-            _print_diff(ref_s, produced)
+    mcp_s, lc_s = _canonical(mcp_tools), _canonical(lc_tools)
 
     if mcp_s == lc_s:
-        print(f"\n{OK} I due bracci presentano al modello gli stessi identici byte.")
-    else:
-        failures += 1
-        print(f"\n{KO} I DUE BRACCI DIVERGONO: le differenze misurate non")
-        print("  sarebbero attribuibili al protocollo. Campagna da non eseguire.")
-        _print_diff(mcp_s, lc_s)
+        print(f"{OK} I due bracci pubblicano schemi identici.")
+        print(f"  {len(mcp_s)} caratteri per parte.")
+        return 0
 
-    return 1 if failures else 0
+    print("I due schemi differiscono. Non e' un errore: e' la misura.")
+    print(f"  MCP      : {len(mcp_s)} caratteri")
+    print(f"  LangChain: {len(lc_s)} caratteri")
+    print(f"  scarto   : {len(mcp_s) - len(lc_s):+d} caratteri "
+          f"({(len(mcp_s) - len(lc_s)) / len(lc_s):+.1%})")
+    print()
+    _print_diff(lc_s, mcp_s)
+    # Esce con zero: una differenza va riportata, non trattata come guasto.
+    return 0
 
 
 def _print_diff(expected: str, actual: str) -> None:

@@ -12,82 +12,90 @@ ecosistema. Il confronto e' quindi tra *approcci di orchestrazione*, non
 tra due modi di usare lo stesso framework: instradare MCP attraverso
 `langchain-mcp-adapters` misurerebbe LangChain-che-parla-MCP, non MCP.
 
-### Perche' i bracci eseguiti sono tre
 
-Pareggiare il contesto presentato al modello e' l'unico modo di
-attribuire al meccanismo le differenze osservate. Ma pareggiarlo cancella
-differenze che sono reali: LangChain rimanda al modello, a ogni giro, il
-ragionamento dei giri precedenti, e chi lo adotta quel costo lo paga.
-Sopprimere quella differenza per ottenere la parita' significherebbe
-trasformare in un controllo l'unico risultato che avevamo trovato.
+## Cosa e' tenuto fisso e cosa no
 
-Si esegue percio' anche una terza condizione, e i confronti diventano tre:
+Il rischio del disegno a due loop e' che le differenze misurate non siano
+attribuibili al meccanismo di integrazione. La risposta non e' pareggiare
+tutto: c'e' una linea fra pareggiare **l'ambiente** attorno ai sistemi in
+esame e pareggiare **il comportamento dei sistemi stessi**, e la seconda
+cosa non e' un controllo ma una contaminazione.
 
-| confronto | cosa isola |
-|---|---|
-| `mcp-conforme` contro `langchain` | il meccanismo: stesso contesto, integrazione diversa |
-| `mcp` contro `langchain` | cio' che si ottiene in pratica, senza pareggiare nulla |
-| `mcp` contro `mcp-conforme` | attribuisce lo scarto alla gestione del contesto del framework |
+Si tiene fisso l'ambiente:
 
-`mcp` e' l'host nella forma che scriverebbe il suo autore; `mcp-conforme`
-riproduce sul filo esattamente cio' che trasmette LangChain, verificato
-con `arm_langchain/wire.py`. Lo scarto misurato fra le due condizioni:
-+33 token in ingresso alla seconda interrogazione, +84 alla terza.
-
-## Il controllo su cui poggia tutto
-
-Il rischio del disegno a due loop e' che i bracci presentino al modello
-input diversi, rendendo le differenze misurate non attribuibili al
-protocollo. Tre presidi:
-
-1. **`shared/tools_spec.py`** definisce nome, descrizione e schema degli
-   argomenti **una sola volta**. Il server MCP li pubblica letteralmente
-   (per questo usa l'API di basso livello dell'SDK e non `MCPServer`, che
-   li dedurrebbe dalle firme); il braccio LangChain li passa come
-   `args_schema` sotto forma di dizionario, per la stessa ragione.
-   Verificato: gli schemi che i due bracci presentano al modello
-   coincidono byte per byte.
-2. **`shared/operations.py`** e' l'unica implementazione delle chiamate
+1. **`shared/operations.py`** e' l'unica implementazione delle chiamate
    REST. I bracci cambiano come lo strumento e' *esposto*, mai cosa *fa*.
-3. **`shared/tasks.py`** definisce il prompt di sistema e i compiti, di
-   nuovo una sola volta. Nulla in MCP impone un certo prompt e nulla in
-   LangChain lo vieta: e' una scelta dello sviluppatore, non una
-   proprieta' dei due approcci, e lasciarla divergere metterebbe nei
-   conteggi di iterazioni una differenza arbitraria indistinguibile da un
-   effetto del protocollo. Verificato: senza `system_prompt` esplicito
-   `create_agent` invia al modello il solo messaggio dell'utente, quindi
-   il framework non ne aggiunge di suo.
-4. **Diff dei body HTTP** inviati a `/v1/chat/completions` nei due
-   bracci: se `tools` e `messages` coincidono, il modello riceve lo
-   stesso input.
+2. **`shared/tasks.py`** definisce il prompt di sistema e i compiti, una
+   sola volta. Nulla in MCP impone un certo prompt e nulla in LangChain lo
+   vieta: e' una scelta dello sviluppatore, non una proprieta' dei due
+   approcci. Verificato: senza `system_prompt` esplicito `create_agent`
+   invia al modello il solo messaggio dell'utente.
+3. Stesso modello, stesso endpoint, stessi parametri di generazione,
+   stessa politica di ritentativi davanti agli stessi guasti.
 
-`harness/schema_gate.py` verifica il campo `tools` e **passa**: gli
-schemi vengono raccolti da un vero `tools/list` su un server MCP in
-esecuzione, quindi dopo serializzazione JSON-RPC, trasmissione e
-deserializzazione — non confrontando definizioni in memoria, che
-sarebbero identiche per costruzione. Resta da verificare `messages`, che
-dipende dai loop agentici.
+Non si tiene fisso cio' che appartiene ai due ecosistemi. Ciascun braccio
+registra le funzioni presso la **propria API di alto livello** —
+`MCPServer.tool()` da un lato, `@tool` dall'altro — e lascia che sia
+quella a derivare nome, descrizione e schema. E' il modo in cui questi
+strumenti vengono scritti nella pratica, ed e' quello che il confronto
+deve misurare; in MCP, per di piu', il server lo pubblica spesso qualcun
+altro rispetto a chi costruisce l'agente, che e' l'intero senso del
+problema N x M.
 
-`harness/messages_gate.py` verifica `messages`, ma **va riscritto** e nella
-forma attuale non costituisce una prova. Confronta due tracce dello stesso
-compito, ed entrambe sono ricostruzioni: quella LangChain nasce da
-`convert_to_openai_messages` dentro il callback, che produce qualcosa di
-simile al payload trasmesso e non il payload. Il gate e' percio' cieco a
-tutto cio' che il framework aggiunge o toglie sul filo, ed e' esattamente
-li' che si annidavano le due divergenze poi corrette: il rimando del
-ragionamento dei giri precedenti e l'assenza di `name` sui messaggi di
-strumento. Nessuna delle due era stata segnalata.
+Il banco di prova passava prima uno schema scritto a mano a entrambi, e i
+due bracci presentavano al modello gli stessi identici byte. Il prezzo era
+che nessuno dei due ecosistemi esercitava mai la propria generazione di
+schemi — cioe' proprio la parte che usa chi li adotta.
 
-Cade con esso anche la tolleranza sul conteggio dei token in ingresso,
-giustificata con la segmentazione casuale degli identificativi di
-chiamata: il braccio MCP produce lo stesso conteggio a ogni ripetizione,
-quindi quella spiegazione e' falsa e la tolleranza mascherava proprio la
-divergenza da intercettare. La riscrittura deve poggiare sul payload reale
-catturato da `arm_langchain/wire.py`.
+### Le differenze diventano misure
+
+`harness/schema_gate.py` non verifica piu' la parita' degli schemi: la
+misura. Misurato sui sette strumenti: MCP pubblica **il 28% di caratteri
+in piu**, tutti `title` generati da Pydantic (`"title": "Event Id"`, e un
+`"delete_registrationArguments"` per ogni strumento) che non aggiungono
+nulla a cio' che il modello deve sapere.
+
+Un'altra differenza riguarda la conversazione. `ChatNVIDIA` rimanda al
+modello, a ogni giro, il ragionamento dei giri precedenti: lo deposita in
+`additional_kwargs` leggendo la risposta (`chat_models.py`) e lo riemette
+scrivendo la richiesta successiva (`_utils.py`), senza alcun parametro per
+disattivarlo e senza che chi sviluppa l'agente possa saperlo. Misurato:
++33 token in ingresso alla seconda interrogazione, +84 alla terza. In un
+host MCP quella decisione e' esplicita e sta nel codice di chi lo scrive.
+
+E' emersa solo intercettando il traffico HTTP reale con
+`arm_langchain/wire.py`: la ricostruzione dei messaggi fornita dai
+callback non la mostra.
+
+Una terza differenza riguarda il **fallimento di uno strumento**. Il
+server MCP traduce qualunque eccezione in un risultato con `isError`, e il
+codice dello strumento ignora l'esistenza del protocollo. LangChain sa
+fare altrettanto, ma a due condizioni congiunte: lo strumento deve
+sollevare `ToolException` — la sua eccezione, non una qualsiasi — ed
+essere costruito con `handle_tool_error` a vero, che non e' il default.
+Ne manca una e l'esecuzione dell'agente termina; `create_agent` non espone
+parametri per la seconda. Il dato non e' quindi che LangChain non sappia
+riprendersi, ma il prezzo che chiede: perche' uno strumento sia
+ripristinabile, la logica applicativa deve importare un tipo di eccezione
+del framework — l'accoppiamento che MCP esiste per evitare.
+
+`arm_langchain/tools.py` paga quel prezzo in un involucro che appartiene
+al braccio, cosi' che i due abbiano la stessa capacita' di ripresa e il
+confronto non sia fra un agente che si riprende e uno che muore. La
+matrice completa e' in `harness/error_paths.py`, riproducibile senza
+modello.
+
+```bash
+uv run python -m harness.error_paths
+```
+
+Il gate sulla conversazione (`messages_gate.py`) e' stato **ritirato**. La
+sua premessa — messaggi identici byte per byte fra i bracci — non e' piu'
+un obiettivo, e un controllo che puo' soltanto fallire e' peggio di
+nessun controllo.
 
 ```bash
 uv run python -m harness.schema_gate
-uv run python -m harness.messages_gate --task t1_conteggio
 ```
 
 ## Stato
@@ -96,34 +104,36 @@ uv run python -m harness.messages_gate --task t1_conteggio
 |---|---|---|
 | 0 | Smoke test tool calling su NIM | **superata** |
 | 1 | Server strumentato, fixture, esperimento A | **completata** |
-| 2 | Host MCP standalone con LLM | **implementata**, due condizioni (`mcp`, `mcp-conforme`) |
+| 2 | Host MCP standalone con LLM | **implementata**, da eseguire |
 | 3 | Braccio LangChain | **implementata**, da eseguire |
-| 4 | Parita' dell'input (gate) | **verde** su `tools`; da riscrivere su `messages` |
+| 4 | Differenze fra gli schemi | **misurata**: +28% di caratteri per MCP |
 | 5 | Caratterizzazione rumore `t_llm` | da fare |
-| 6 | Campagna completa | **implementata**, tre bracci x sei compiti, da eseguire |
+| 4b | Percorsi d'errore | **misurati**: recupero simmetrico solo dopo adattamento |
+| 6 | Campagna completa | **implementata**, due bracci x sette compiti, da eseguire |
 | 6b | Riepilogo leggibile della campagna | **implementata** |
 | 7 | Analisi e tabelle LaTeX | da fare |
 
 ## Struttura
 
 ```
-shared/tools_spec.py     definizione unica degli strumenti
-shared/operations.py     unica implementazione delle chiamate REST
-shared/tasks.py          prompt di sistema condiviso e sei compiti
+shared/operations.py     le funzioni: unica implementazione REST, e la
+                         sorgente da cui ogni braccio deriva lo schema
+shared/tasks.py          prompt di sistema condiviso e sette compiti
 server/wrapper.py        avvolge l'Event Manager: conteggio REST + reset
 server/fixture.py        dataset deterministico e leggibile
-arm_mcp/server.py        server MCP (API di basso livello, schemi espliciti)
+arm_mcp/server.py        server MCP via MCPServer (schema dedotto dall'SDK)
 arm_mcp/http_server.py   lo stesso server su trasporto Streamable HTTP
 arm_mcp/host.py          fase 2: host agentico autonomo (niente framework)
-arm_langchain/tools.py   strumenti LangChain derivati da tools_spec
+arm_langchain/tools.py   strumenti via @tool (schema dedotto dal framework)
 arm_langchain/agent.py   fase 3: agente ReAct + cattura della traccia
 arm_langchain/wire.py    intercetta il payload HTTP realmente trasmesso
 shared/nim.py            client per l'endpoint, usato dal solo host MCP
 shared/env.py            caricamento di .env (chiave API)
 harness/smoke_nim.py     fase 0: verifica del tool calling su NIM
 harness/trace.py         registrazione integrale delle esecuzioni
-harness/schema_gate.py   fase 4a: parita' degli schemi (tools)
-harness/messages_gate.py fase 4b: parita' della conversazione (messages)
+harness/schema_gate.py   misura la differenza fra gli schemi dei due bracci
+harness/error_paths.py   misura come i due segnalano il fallimento di uno
+                         strumento (deterministico, senza modello)
 harness/campaign.py      fase 6: campagna, bracci alternati e riprendibile
 harness/summary.py       fase 6b: riepilogo Markdown della campagna
 microbench/transport.py  esperimento A: overhead di trasporto, senza LLM
@@ -132,9 +142,8 @@ results/                 un JSON per esecuzione, piu' il riepilogo
 
 Le tracce servono a ricostruire un'esecuzione, non a leggerla: contengono i
 messaggi e gli schemi integrali. Il riepilogo estrae da un'intera cartella
-di tracce le sole grandezze su cui la tesi si pronuncia, con i tre bracci
-su righe adiacenti, un valore per ogni ripetizione e i tre confronti
-riportati separatamente. Viene generato in coda
+di tracce le sole grandezze su cui la tesi si pronuncia, con i due bracci
+su righe adiacenti e un valore per ogni ripetizione. Viene generato in coda
 alla campagna, ed e' rigenerabile in qualunque momento, anche su una
 campagna interrotta a meta':
 
@@ -212,8 +221,8 @@ Eseguire un compito con l'uno o l'altro braccio (senza `--task` li esegue
 tutti):
 
 ```bash
-uv run python -m arm_mcp.host --task t3_join_titoli
-uv run python -m arm_langchain.agent --task t3_join_titoli
+uv run python -m arm_mcp.host --task t6_iscrizione_condizionale
+uv run python -m arm_langchain.agent --task t6_iscrizione_condizionale
 ```
 
 Eseguire la campagna. E' riprendibile: rilanciandola sulla stessa
