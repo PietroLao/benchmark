@@ -99,6 +99,93 @@ def _finish_reason(generation: Any) -> str | None:
     return (getattr(messaggio, "response_metadata", None) or {}).get("finish_reason")
 
 
+#: Marca le invocazioni che il framework ha rifiutato senza eseguirle.
+_VIA_RESPINTA = "langchain/ToolNode(respinta)"
+
+
+def _e_respinta(chiamata: dict[str, Any]) -> bool:
+    return (chiamata.get("via") or "") == _VIA_RESPINTA
+
+
+def _riconcilia_respinte(trace: RunTrace, nomi_validi: set[str]) -> int:
+    """Registra le chiamate a strumento che ``ToolNode`` ha respinto.
+
+    Il callback registra gli strumenti su ``on_tool_start``, che per una
+    chiamata respinta **non viene mai invocato**: ``ToolNode`` la rifiuta
+    prima di eseguire alcunche'. La chiamata spariva quindi dalla traccia,
+    mentre l'host MCP la registra — il server MCP risponde ``Unknown
+    tool`` e l'host annota il risultato d'errore come per ogni altra
+    invocazione.
+
+    Ne nasceva un conteggio **asimmetrico a parita' di comportamento del
+    modello**. Misurato su ``gpt-oss-20b``, che lascia sfuggire nel nome
+    della funzione i marcatori di canale del formato *harmony*
+    (``list_users<|channel|>commentary``): ``mcp/t2/rep2`` e
+    ``langchain/t2/rep4`` fanno entrambe cinque iterazioni con tre
+    invocazioni valide e una malformata, ma la traccia MCP ne riportava
+    quattro e quella LangChain tre. L'errore e' del modello e va contato:
+    il difetto era non contarlo in uno dei due bracci.
+
+    Si ricostruisce dalle ``llm_calls`` anziche' dai messaggi restituiti
+    dal grafo, cosi' che funzioni anche quando ``ainvoke`` termina per
+    eccezione e non restituisce nulla.
+
+    L'ordine viene ricomposto: le respinte vengono inserite nella
+    posizione in cui il modello le ha chieste, non aggiunte in coda.
+    """
+    richieste: list[tuple[Any, str, Any]] = []
+    esiti: dict[Any, Any] = {}
+    for chiamata in trace.llm_calls:
+        messaggio = (
+            ((chiamata.get("response") or {}).get("choices") or [{}])[0].get("message")
+            or {}
+        )
+        for tc in messaggio.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            richieste.append((tc.get("id"), fn.get("name") or "?", fn.get("arguments")))
+        for m in (chiamata.get("request") or {}).get("messages") or []:
+            if m.get("role") == "tool":
+                esiti[m.get("tool_call_id")] = m.get("content")
+
+    # Si riparte dalle sole invocazioni eseguite: le respinte gia'
+    # inserite da una passata precedente vengono ricostruite, non
+    # riutilizzate. Senza questo filtro la funzione non e' idempotente —
+    # una seconda passata le conterebbe una seconda volta — e basterebbe
+    # un percorso d'uscita che la invoca due volte per gonfiare in
+    # silenzio il conteggio degli strumenti.
+    eseguite = [c for c in trace.tool_calls if not _e_respinta(c)]
+    ordinate: list[dict[str, Any]] = []
+    i = respinte = 0
+    for identificativo, nome, argomenti in richieste:
+        if nome in nomi_validi and i < len(eseguite):
+            ordinate.append(eseguite[i])
+            i += 1
+            continue
+        respinte += 1
+        ordinate.append(
+            {
+                "index": 0,
+                "name": nome,
+                "arguments": argomenti,
+                "result": esiti.get(identificativo, ""),
+                # ``ToolNode`` respinge in processo, senza alcun giro di
+                # rete: a differenza del braccio MCP, dove la chiamata
+                # raggiunge il server prima di essere rifiutata, qui non
+                # c'e' un tempo da misurare.
+                "elapsed_ms": 0.0,
+                "via": _VIA_RESPINTA,
+                "is_error": True,
+            }
+        )
+    ordinate.extend(eseguite[i:])
+    for n, chiamata_ordinata in enumerate(ordinate, 1):
+        chiamata_ordinata["index"] = n
+    trace.tool_calls[:] = ordinate
+    if respinte:
+        trace.event("strumenti_respinti", n=respinte)
+    return respinte
+
+
 class TraceCallback(BaseCallbackHandler):
     """Registra nella traccia cio' che il framework fa internamente.
 
@@ -291,6 +378,7 @@ async def run_task(
     from langchain.agents import create_agent
     from langchain_core.utils.function_calling import convert_to_openai_tool
     from langchain_nvidia_ai_endpoints import ChatNVIDIA
+    from langgraph.errors import GraphRecursionError
 
     wire.installa()
     wire.azzera()
@@ -323,17 +411,40 @@ async def run_task(
     )
     agent = create_agent(llm, tools=tools, system_prompt=SYSTEM_PROMPT)
 
+    nomi_validi = {t.name for t in tools}
     callback = TraceCallback(trace, tools_payload, params)
     try:
         result = await agent.ainvoke(
             {"messages": [{"role": "user", "content": task.prompt}]},
+            # Due nodi del grafo per giro dell'agente — il modello e gli
+            # strumenti — quindi questo limite e' esattamente
+            # ``max_iterations`` iterazioni, lo stesso che l'host MCP
+            # applica al proprio ciclo.
             config={"callbacks": [callback], "recursion_limit": max_iterations * 2},
         )
+    except GraphRecursionError as exc:
+        # **Non e' un guasto dell'infrastruttura.** E' il limite di
+        # iterazioni che scatta, cioe' lo stesso evento che l'host MCP
+        # registra come ``limite_iterazioni``: il modello e' entrato in
+        # ciclo e non ha concluso il compito.
+        #
+        # Finiva invece nell'``except`` generico sottostante, quindi come
+        # ``errore_agente``, che ``harness/summary.py`` classifica fra gli
+        # esiti infrastrutturali ed **esclude dal confronto**. Lo stesso
+        # fallimento veniva percio' contato nel braccio MCP e cancellato
+        # in quello LangChain, e nessun invariante poteva accorgersene:
+        # e' una decisione di etichettatura, non una misura.
+        _riconcilia_respinte(trace, nomi_validi)
+        trace.event("limite_iterazioni", limit=max_iterations, detail=str(exc)[:200])
+        trace.finish(status="limite_iterazioni")
+        return trace
     except Exception as exc:  # noqa: BLE001 — va registrato, non propagato
+        _riconcilia_respinte(trace, nomi_validi)
         trace.event("errore_agente", detail=f"{type(exc).__name__}: {exc}")
         trace.finish(status="errore_agente")
         return trace
 
+    _riconcilia_respinte(trace, nomi_validi)
     final = result["messages"][-1]
     answer = getattr(final, "content", "") or ""
     trace.finish(

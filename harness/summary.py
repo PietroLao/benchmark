@@ -23,6 +23,16 @@ ripetizioni sarebbe stata indistinguibile dal rumore.
 confronto e' l'oggetto della misura, non un esercizio lasciato a chi
 legge.
 
+**Le serie sono incolonnate a passo fisso**, e le esecuzioni escluse
+lasciano un vuoto anziche' accorciare la riga. Vale la stessa ragione
+delle due scelte precedenti: se la n-esima ripetizione non sta alla
+stessa ascissa in ogni colonna e in entrambi i bracci, riportare i
+valori uno per ripetizione non serve a nulla, perche' non si possono
+mettere in corrispondenza. Con le celle allineate a destra e una
+esecuzione tolta, il buco compariva all'inizio della riga e faceva
+leggere come mancante la prima ripetizione invece di quella davvero
+interrotta.
+
 Uso::
 
     uv run python -m harness.summary
@@ -64,6 +74,43 @@ CONFRONTI: tuple[tuple[str, str, str], ...] = (
 INFRASTRUTTURALI = {"errore_llm", "errore_agente"}
 
 VUOTO = "—"
+
+#: Un carattere per esito, cosi' che la colonna resti larga quanto il
+#: numero di ripetizioni e si legga **posizione per posizione** accanto
+#: alle colonne numeriche. Prima l'esito compariva come conteggio in
+#: ordine di frequenza — ``3×ok, stato_non_modificato, risposta_errata``
+#: — che oltre a dilatare la tabella era in un ordine *diverso* da quello
+#: delle altre colonne: non si poteva sapere quale ripetizione fosse
+#: fallita, cioe' proprio la cosa per cui i valori sono riportati uno per
+#: ripetizione anziche' come mediana.
+SIMBOLI = {
+    "ok": "·",
+    "risposta_errata": "R",
+    "stato_non_modificato": "S",
+    "limite_iterazioni": "L",
+    "errore_llm": "!",
+    "errore_agente": "!",
+}
+
+LEGENDA = {
+    "·": "compito risolto",
+    "R": "risposta errata",
+    "S": "stato del servizio non come atteso",
+    "L": "limite di iterazioni raggiunto",
+    "!": "guasto dell'endpoint o della rete",
+    "?": "esito non riconosciuto",
+}
+
+
+class Serie(list):
+    """Valori di ogni ripetizione, in ordine di esecuzione.
+
+    E' una lista marcata: ``tabella`` la riconosce e incolonna i valori
+    su larghezza fissa, cosi' che la n-esima ripetizione stia alla stessa
+    ascissa in ogni colonna e le righe dei due bracci si confrontino a
+    vista. Separati da virgola e di larghezza variabile — ``13026,5506``
+    accanto a ``2,2`` — quei numeri non erano leggibili.
+    """
 
 
 # --- lettura --------------------------------------------------------------
@@ -145,19 +192,14 @@ def raggruppa(
 # --- formattazione --------------------------------------------------------
 
 
-def serie(valori: list[Any]) -> str:
-    """Valori di tutte le ripetizioni, nell'ordine in cui sono state svolte."""
-    if not valori or all(v is None for v in valori):
-        return VUOTO
-    return ",".join(VUOTO if v is None else str(v) for v in valori)
+def _arrotonda(valore: Any, cifre: int) -> Any:
+    if valore is None:
+        return None
+    return round(valore, cifre) if cifre else int(round(valore))
 
 
-def serie_arrotondata(valori: list[Any], cifre: int = 1) -> str:
-    return serie([None if v is None else round(v, cifre) for v in valori])
-
-
-def esiti(tracce: list[dict[str, Any]]) -> str:
-    """Riassume gli stati come conteggio, in ordine di frequenza.
+def simbolo(traccia: dict[str, Any]) -> str:
+    """Un carattere per l'esito di una esecuzione.
 
     Non si collassa su riuscito/fallito. ``risposta_errata`` e
     ``stato_non_modificato`` descrivono il comportamento del modello,
@@ -165,22 +207,43 @@ def esiti(tracce: list[dict[str, Any]]) -> str:
     diverse e ridurle a un booleano cancellerebbe proprio l'informazione
     per cui vale la pena guardare una campagna.
     """
-    conteggio = Counter(t.get("status") or "?" for t in tracce)
-    return ", ".join(
-        f"{n}×{stato}" if n > 1 else stato for stato, n in conteggio.most_common()
-    )
+    return SIMBOLI.get(traccia.get("status") or "?", "?")
 
 
-def stato_verificato(tracce: list[dict[str, Any]]) -> str:
+def legenda(tracce: list[dict[str, Any]]) -> str:
+    """Spiega i soli simboli che compaiono davvero."""
+    presenti = Counter(SIMBOLI.get(t.get("status") or "?", "?") for t in tracce)
+    voci = [
+        f"`{s}` {LEGENDA[s]} ({presenti[s]})"
+        for s in LEGENDA
+        if presenti.get(s)
+    ]
+    return "  ·  ".join(voci)
+
+
+def stato_verificato(
+    tracce: list[dict[str, Any]], ripetizioni: list[int]
+) -> Serie | str:
     """Esito del controllo sullo stato del servizio, per i compiti che scrivono."""
-    valori = [(t.get("config") or {}).get("state_verified") for t in tracce]
-    if all(v is None for v in valori):
+    if all((t.get("config") or {}).get("state_verified") is None for t in tracce):
         return VUOTO
-    return serie([None if v is None else ("si" if v else "NO") for v in valori])
+
+    def reso(t: dict[str, Any]) -> Any:
+        v = (t.get("config") or {}).get("state_verified")
+        return None if v is None else ("si" if v else "NO")
+
+    return per_ripetizione(tracce, reso, ripetizioni)
 
 
-def token(tracce: list[dict[str, Any]], chiave: str) -> str:
-    """Token riportati dall'endpoint, o caratteri quando non li riporta.
+#: Su cosa ripiegare quando l'endpoint non dichiara ``usage``.
+_RIPIEGO_TOKEN = {
+    "prompt_tokens": "chars_sent",
+    "completion_tokens": "chars_received",
+}
+
+
+def token(traccia: dict[str, Any], chiave: str) -> Any:
+    """Token riportati dall'endpoint per una esecuzione, o i caratteri.
 
     Se l'endpoint non fornisce ``usage``, ``metrics`` lascia i token a
     ``None`` e conserva il numero di caratteri. Ripiegare su quelli e'
@@ -188,35 +251,106 @@ def token(tracce: list[dict[str, Any]], chiave: str) -> str:
     porta allora il suffisso ``c``, e le due unita' non vanno confrontate
     fra loro.
     """
-    fuori = {"prompt_tokens": "chars_sent", "completion_tokens": "chars_received"}
-    celle = []
-    for t in tracce:
-        valore = _metrica(t, chiave)
-        if valore is None:
-            ripiego = _metrica(t, fuori[chiave])
-            celle.append(None if ripiego is None else f"{ripiego}c")
-        else:
-            celle.append(valore)
-    return serie(celle)
+    valore = _metrica(traccia, chiave)
+    if valore is not None:
+        return valore
+    ripiego = _metrica(traccia, _RIPIEGO_TOKEN[chiave])
+    return None if ripiego is None else f"{ripiego}c"
 
 
-def tabella(intestazioni: list[str], righe: list[list[str]]) -> str:
+def _testo(valore: Any) -> str:
+    return VUOTO if valore is None else str(valore)
+
+
+def _incolonna(intestazioni: list[str], righe: list[list[Any]]) -> None:
+    """Rende ogni ``Serie`` una stringa a passo fisso, colonna per colonna.
+
+    La larghezza si calcola sull'intera colonna, non sulla singola cella:
+    e' la condizione perche' la n-esima ripetizione stia alla stessa
+    ascissa nelle righe dei due bracci, che e' l'unico modo di
+    confrontarle a vista.
+    """
+    for i in range(len(intestazioni)):
+        serie_colonna = [r[i] for r in righe if isinstance(r[i], Serie)]
+        if not serie_colonna:
+            continue
+        larghezza = max(
+            (len(_testo(v)) for cella in serie_colonna for v in cella), default=1
+        )
+        for r in righe:
+            if isinstance(r[i], Serie):
+                r[i] = (
+                    " ".join(_testo(v).rjust(larghezza) for v in r[i])
+                    if len(r[i])
+                    else VUOTO
+                )
+
+
+def tabella(intestazioni: list[str], righe: list[list[Any]]) -> str:
     """Compone una tabella Markdown allineando le colonne nel sorgente.
 
     L'allineamento e' superfluo una volta reso in HTML, ma il file viene
     letto quasi sempre cosi' com'e', in un editor o in un terminale.
+
+    Le colonne numeriche e quelle di tipo ``Serie`` si allineano a
+    destra, le altre a sinistra: incolonnare le cifre e' cio' che rende
+    confrontabili a vista due righe adiacenti.
     """
+    righe = [list(r) for r in righe]
+    seriali = {
+        i for i in range(len(intestazioni)) if any(isinstance(r[i], Serie) for r in righe)
+    }
+    _incolonna(intestazioni, righe)
     larghezze = [
         max(len(str(r[i])) for r in [intestazioni, *righe])
         for i in range(len(intestazioni))
     ]
-    def riga(celle: list[str]) -> str:
-        return "| " + " | ".join(
-            str(c).ljust(larghezze[i]) for i, c in enumerate(celle)
-        ) + " |"
 
-    separatore = "|" + "|".join("-" * (w + 2) for w in larghezze) + "|"
-    return "\n".join([riga(intestazioni), separatore, *(riga(r) for r in righe)])
+    def riga(celle: list[Any], intesta: bool = False) -> str:
+        rese = []
+        for i, c in enumerate(celle):
+            testo = str(c)
+            allinea = testo.rjust if (i in seriali and not intesta) else testo.ljust
+            rese.append(allinea(larghezze[i]))
+        return "| " + " | ".join(rese) + " |"
+
+    separatore = "|" + "|".join(
+        ("-" * (w + 1) + ":") if i in seriali else "-" * (w + 2)
+        for i, w in enumerate(larghezze)
+    ) + "|"
+    return "\n".join(
+        [riga(intestazioni, intesta=True), separatore, *(riga(r) for r in righe)]
+    )
+
+
+def _ripetizioni(
+    gruppi: dict[tuple[str, str, str], list[dict[str, Any]]], modello: str
+) -> list[int]:
+    """Le ripetizioni previste, ricavate da quelle osservate."""
+    viste = {
+        _rep(t) for (m, _, _), v in gruppi.items() if m == modello for t in v
+    }
+    return sorted(viste)
+
+
+def per_ripetizione(
+    tracce: list[dict[str, Any]], valore: Any, ripetizioni: list[int]
+) -> Serie:
+    """Colloca ogni valore alla posizione della **sua** ripetizione.
+
+    Costruire la serie scorrendo le tracce presenti sembra equivalente e
+    non lo e': quando una esecuzione manca del tutto — la campagna e'
+    stata interrotta su quella cella, o e' morta senza salvare — la riga
+    si accorcia, e poiche' le celle sono allineate a destra il buco
+    compare **all'inizio**. Con la quinta ripetizione mancante la riga
+    mostrava quattro valori e faceva leggere come assente la prima.
+
+    E' la stessa correzione gia' applicata alle esecuzioni escluse per
+    guasto, estesa a quelle che non esistono affatto: in entrambi i casi
+    la n-esima posizione deve restare la n-esima ripetizione.
+    """
+    per_rep = {_rep(t): valore(t) for t in tracce}
+    return Serie(per_rep.get(r) for r in ripetizioni)
 
 
 # --- sezioni --------------------------------------------------------------
@@ -232,6 +366,7 @@ def sezione_comportamento(
     pronuncia, perche' sono le sole indipendenti dal carico dell'endpoint.
     """
     righe = []
+    reps = _ripetizioni(gruppi, modello)
     compiti = sorted({c for (m, c, _) in gruppi if m == modello})
     for compito in compiti:
         for braccio in ARMS:
@@ -242,11 +377,11 @@ def sezione_comportamento(
                 [
                     compito if braccio == ARMS[0] else "",
                     braccio,
-                    esiti(tracce),
-                    stato_verificato(tracce),
-                    serie([_metrica(t, "n_llm_calls") for t in tracce]),
-                    serie([_metrica(t, "n_tool_calls") for t in tracce]),
-                    serie([_metrica(t, "n_rest_calls") for t in tracce]),
+                    per_ripetizione(tracce, simbolo, reps),
+                    stato_verificato(tracce, reps),
+                    per_ripetizione(tracce, lambda t: _metrica(t, "n_llm_calls"), reps),
+                    per_ripetizione(tracce, lambda t: _metrica(t, "n_tool_calls"), reps),
+                    per_ripetizione(tracce, lambda t: _metrica(t, "n_rest_calls"), reps),
                 ]
             )
     return tabella(
@@ -254,10 +389,79 @@ def sezione_comportamento(
     )
 
 
-def sezione_costo(
+def _compromessa(traccia: dict[str, Any]) -> bool:
+    """Se i conteggi dell'esecuzione siano parziali senza dichiararlo.
+
+    Una traccia con due interrogazioni di cui la seconda andata in
+    timeout somma i token della sola prima, e il totale sembra completo.
+    Osservato: 579 token accanto ai 1668 degli altri bracci, che avrebbe
+    suggerito un consumo tre volte inferiore laddove l'esecuzione era
+    semplicemente morta a meta'.
+    """
+    return traccia.get("status") in INFRASTRUTTURALI
+
+
+def _righe_costo(
+    gruppi: dict[tuple[str, str, str], list[dict[str, Any]]],
+    modello: str,
+    colonne: list[Any],
+) -> list[list[Any]]:
+    """Costruisce le righe di una tabella di costo, due bracci per compito.
+
+    Ogni ``colonne`` e' una funzione di **una** traccia. Le esecuzioni
+    compromesse da un guasto lasciano un vuoto, e cosi' quelle che non
+    esistono affatto: in entrambi i casi la posizione nella riga resta
+    quella della ripetizione, che e' la sola cosa che rende le due righe
+    di un compito confrontabili a vista.
+    """
+    righe = []
+    reps = _ripetizioni(gruppi, modello)
+    for compito in sorted({c for (m, c, _) in gruppi if m == modello}):
+        for braccio in ARMS:
+            tracce = gruppi.get((modello, compito, braccio), [])
+            if not tracce or all(_compromessa(t) for t in tracce):
+                continue
+
+            def cella(f: Any, tracce: list[dict[str, Any]] = tracce) -> Serie:
+                return per_ripetizione(
+                    tracce, lambda t: None if _compromessa(t) else f(t), reps
+                )
+
+            righe.append(
+                [compito if braccio == ARMS[0] else "", braccio]
+                + [cella(f) for f in colonne]
+            )
+    return righe
+
+
+def sezione_token(
     gruppi: dict[tuple[str, str, str], list[dict[str, Any]]], modello: str
 ) -> str:
-    """Il costo dell'esecuzione.
+    """Quanto contesto i due bracci fanno leggere e scrivere al modello.
+
+    Sta in una tabella propria. Insieme ai tempi erano otto colonne di
+    serie numeriche, e nessuna delle due domande — *quanto costa in
+    token* e *quanto e' durata* — si riusciva a leggere: le cifre dei
+    token sono a quattro o cinque caratteri e schiacciavano tutto il
+    resto.
+    """
+    return tabella(
+        ["compito", "braccio", "tok in", "tok out"],
+        _righe_costo(
+            gruppi,
+            modello,
+            [
+                lambda t: token(t, "prompt_tokens"),
+                lambda t: token(t, "completion_tokens"),
+            ],
+        ),
+    )
+
+
+def sezione_tempo(
+    gruppi: dict[tuple[str, str, str], list[dict[str, Any]]], modello: str
+) -> str:
+    """Il tempo dell'esecuzione, e quanto ne e' andato perso.
 
     ``dispatch`` e' il tempo speso a invocare gli strumenti, ed e' l'unica
     colonna che si ricollega all'esperimento A. ``lat. LLM`` misura invece
@@ -269,56 +473,19 @@ def sezione_costo(
     LLM`` non contiene perche' quella somma i soli tentativi riusciti.
     Senza questa colonna un'esecuzione durata dodici minuti di orologio
     comparirebbe in tabella con sei secondi di latenza, come e' accaduto.
-
-    Le esecuzioni interrotte da guasti dell'infrastruttura sono escluse:
-    i loro conteggi sono parziali senza dichiararlo. Compaiono nella
-    tabella del comportamento, dove la colonna degli esiti le rende
-    visibili, e nell'elenco in fondo.
     """
-    righe = []
-    compiti = sorted({c for (m, c, _) in gruppi if m == modello})
-    for compito in compiti:
-        for braccio in ARMS:
-            # Si escludono le esecuzioni interrotte da guasti. I loro
-            # conteggi sono parziali e non lo dichiarano: una traccia con
-            # due interrogazioni di cui la seconda andata in timeout somma
-            # i token della sola prima, e il totale sembra completo.
-            # Osservato: 579 token accanto ai 1668 degli altri bracci, che
-            # avrebbe suggerito un consumo tre volte inferiore laddove
-            # l'esecuzione era semplicemente morta a meta'.
-            tracce = [
-                t
-                for t in gruppi.get((modello, compito, braccio), [])
-                if t.get("status") not in INFRASTRUTTURALI
-            ]
-            if not tracce:
-                continue
-            righe.append(
-                [
-                    compito if braccio == ARMS[0] else "",
-                    braccio,
-                    token(tracce, "prompt_tokens"),
-                    token(tracce, "completion_tokens"),
-                    serie_arrotondata([_metrica(t, "latency_tools_ms") for t in tracce]),
-                    serie([_falliti(t, "n_retries") for t in tracce]),
-                    serie_arrotondata(
-                        [_falliti(t, "latency_retries_s") for t in tracce], 0
-                    ),
-                    serie_arrotondata([_metrica(t, "latency_llm_s") for t in tracce]),
-                ]
-            )
     return tabella(
-        [
-            "compito",
-            "braccio",
-            "tok in",
-            "tok out",
-            "dispatch ms",
-            "ritent.",
-            "persi s",
-            "lat. LLM s",
-        ],
-        righe,
+        ["compito", "braccio", "dispatch ms", "ritent.", "persi s", "lat. LLM s"],
+        _righe_costo(
+            gruppi,
+            modello,
+            [
+                lambda t: _arrotonda(_metrica(t, "latency_tools_ms"), 1),
+                lambda t: _falliti(t, "n_retries"),
+                lambda t: _arrotonda(_falliti(t, "latency_retries_s"), 0),
+                lambda t: _arrotonda(_metrica(t, "latency_llm_s"), 1),
+            ],
+        ),
     )
 
 
@@ -349,7 +516,21 @@ def sezione_divergenze(
 
     blocchi = []
     for primo, secondo, spiegazione in CONFRONTI:
-        voci = []
+        # Le due domande vengono separate. *Hanno fatto le stesse cose?*
+        # si risponde per uguaglianza fra interi piccoli, e quando la
+        # risposta e' no serve vedere i valori di ogni ripetizione.
+        # *Costano lo stesso?* si risponde su una grandezza che oscilla,
+        # quindi con una mediana e una soglia, ed e' la stessa domanda per
+        # tutti i compiti: sta percio' in una tabella sola, con i compiti
+        # per riga.
+        #
+        # Tenute insieme, producevano o un elenco piatto di venti voci
+        # tutte della stessa forma, o sette tabelle da una riga ciascuna.
+        comportamento: list[str] = []
+        concordi: list[str] = []
+        righe_token: list[list[Any]] = []
+        sotto_soglia: list[str] = []
+
         for compito in compiti:
             a, b = usabili[(compito, primo)], usabili[(compito, secondo)]
             if not a or not b:
@@ -360,12 +541,13 @@ def sezione_divergenze(
             # per costruzione, e segnalarlo come divergenza attribuirebbe
             # all'approccio quello che e' stato un guasto di rete.
             if len(a) != len(b):
-                voci.append(
-                    f"- **{compito}**: non confrontabile, {len(a)} esecuzioni "
-                    f"utilizzabili per {primo} contro {len(b)} per {secondo}"
+                comportamento.append(
+                    f"- **{compito}** — non confrontabile: {len(a)} esecuzioni "
+                    f"utilizzabili per {primo}, {len(b)} per {secondo}."
                 )
                 continue
 
+            righe = []
             for etichetta, chiave in (
                 ("iterazioni", "n_llm_calls"),
                 ("chiamate a strumento", "n_tool_calls"),
@@ -378,36 +560,73 @@ def sezione_divergenze(
                     v for v in (_metrica(t, chiave) for t in b) if v is not None
                 )
                 if va and vb and va != vb:
-                    voci.append(
-                        f"- **{compito}**, {etichetta}: "
-                        f"{primo} {serie(va)} contro {secondo} {serie(vb)}"
-                    )
-
-            # I token in ingresso vanno trattati a parte. Le tre metriche
-            # sopra sono interi piccoli e si confrontano per uguaglianza;
-            # questi oscillano, quindi si confrontano le mediane e si
-            # riporta lo scarto solo quando supera il rumore. Senza questa
-            # voce, due bracci che si comportano in modo identico ma
-            # presentano al modello un contesto di costo diverso —
-            # schemi derivati diversamente, ragionamento rimandato da un
-            # lato solo — risulterebbero indistinguibili.
-            ma, mb = _mediana(a, "prompt_tokens"), _mediana(b, "prompt_tokens")
-            if ma is not None and mb is not None and _rilevante(ma, mb):
-                delta = mb - ma
-                voci.append(
-                    f"- **{compito}**, token in ingresso: {primo} {ma:.0f} "
-                    f"contro {secondo} {mb:.0f} "
-                    f"({delta:+.0f}, {delta / ma:+.1%})"
+                    righe.append([etichetta, Serie(va), Serie(vb)])
+            if righe:
+                comportamento.append(
+                    f"**{compito}** — valori ordinati, non in ordine di "
+                    f"esecuzione\n\n" + tabella(["", primo, secondo], righe)
                 )
+            else:
+                concordi.append(compito)
 
-        corpo = (
-            "\n".join(voci)
-            if voci
-            else "Nessuna: stessi valori in ogni compito."
+            ma, mb = _mediana(a, "prompt_tokens"), _mediana(b, "prompt_tokens")
+            if ma is None or mb is None:
+                continue
+            if _rilevante(ma, mb):
+                delta = mb - ma
+                righe_token.append(
+                    [
+                        compito,
+                        Serie([f"{ma:.0f}"]),
+                        Serie([f"{mb:.0f}"]),
+                        Serie([f"{delta:+.0f}"]),
+                        Serie([f"{delta / ma:+.1%}"]),
+                    ]
+                )
+            else:
+                sotto_soglia.append(compito)
+
+        parti = [f"**{primo} contro {secondo}** — {spiegazione}\n"]
+
+        parti.append("#### Comportamento\n")
+        parti.append(
+            "Iterazioni, chiamate a strumento, chiamate REST: le tre grandezze\n"
+            "su cui la tesi si pronuncia, perche' sono le sole indipendenti dal\n"
+            "carico dell'endpoint.\n"
         )
-        blocchi.append(f"**{primo} contro {secondo}** — {spiegazione}\n\n{corpo}\n")
+        if comportamento:
+            parti.extend(comportamento)
+            if concordi:
+                parti.append(
+                    "Stessi valori nei due bracci su "
+                    + ", ".join(f"`{c}`" for c in concordi)
+                    + "."
+                )
+        else:
+            parti.append("**Nessuna divergenza in alcun compito.**")
 
-    return "\n".join(blocchi)
+        parti.append("\n#### Contesto inviato al modello\n")
+        parti.append(
+            "Token in ingresso, mediana sulle ripetizioni. Il conteggio oscilla\n"
+            f"anche a contenuto invariato, quindi si riporta solo lo scarto oltre\n"
+            f"{SOGLIA_TOKEN_ASSOLUTA} token e {SOGLIA_TOKEN_RELATIVA:.0%}.\n"
+        )
+        if righe_token:
+            parti.append(
+                tabella(["compito", primo, secondo, "scarto", "rel."], righe_token)
+            )
+            if sotto_soglia:
+                parti.append(
+                    "Sotto la soglia su "
+                    + ", ".join(f"`{c}`" for c in sotto_soglia)
+                    + "."
+                )
+        else:
+            parti.append("Nessuno scarto oltre la soglia.")
+
+        blocchi.append("\n\n".join(p.strip("\n") for p in parti))
+
+    return "\n\n".join(blocchi)
 
 
 def sezione_fallimenti(tracce: list[dict[str, Any]]) -> str:
@@ -424,8 +643,18 @@ def sezione_fallimenti(tracce: list[dict[str, Any]]) -> str:
                 dettaglio = str(evento.get("detail") or evento.get("kind"))[:70]
                 break
         righe.append(
-            [t["task_id"], t["arm"], f"rep{_rep(t)}", t.get("status") or "?", dettaglio or VUOTO]
+            [t["task_id"], t["arm"], f"rep{_rep(t)}", t.get("status") or "?", dettaglio]
         )
+
+    # La colonna del dettaglio esiste solo per i guasti, che sono pochi:
+    # quando nessuno ne ha uno resta una colonna di trattini larga quanto
+    # l'intestazione, e va tolta.
+    if not any(r[4] for r in righe):
+        return tabella(
+            ["compito", "braccio", "rip.", "esito"], [r[:4] for r in righe]
+        )
+    for r in righe:
+        r[4] = r[4] or VUOTO
     return tabella(["compito", "braccio", "rip.", "esito", "dettaglio"], righe)
 
 
@@ -476,20 +705,35 @@ def componi(
         )
 
     for modello in modelli:
+        del_modello = [t for t in tracce if t["model"] == modello]
         parti.append(f"\n## {modello}\n")
+
         parti.append("### Comportamento dell'agente\n")
         parti.append(
-            "Un valore per ripetizione, nell'ordine di esecuzione.\n"
+            "Un valore per ripetizione, nell'ordine di esecuzione: la n-esima\n"
+            "posizione e' la stessa esecuzione in ogni colonna, e le due righe\n"
+            "di uno stesso compito si leggono affiancate.\n"
         )
         parti.append(sezione_comportamento(gruppi, modello))
-        parti.append("\n### Costo\n")
+        parti.append(f"\n{legenda(del_modello)}\n")
+
+        parti.append("\n### Costo in token\n")
+        parti.append(
+            "Contati dall'endpoint, non da noi. Le esecuzioni interrotte da un\n"
+            "guasto sono escluse: i loro totali sono parziali senza dirlo.\n"
+        )
+        parti.append(sezione_token(gruppi, modello))
+
+        parti.append("\n### Tempi\n")
         parti.append(
             "`dispatch ms` e' il tempo di invocazione degli strumenti, l'unica\n"
             "colonna confrontabile con l'esperimento A. `lat. LLM s` misura\n"
             "l'attesa dell'endpoint remoto: dipende dal suo carico, non dal\n"
-            "braccio, e va letta insieme ai ritentativi.\n"
+            "braccio, e va letta insieme a `ritent.` e `persi s`, che sono i\n"
+            "tentativi andati a vuoto e il tempo che sono costati.\n"
         )
-        parti.append(sezione_costo(gruppi, modello))
+        parti.append(sezione_tempo(gruppi, modello))
+
         parti.append("\n### Divergenze fra i bracci\n")
         parti.append(sezione_divergenze(gruppi, modello))
 

@@ -19,3 +19,8 @@ texput.log
 # Esecuzioni singole ad hoc, rigenerabili
 results/traces/
 results/smoke_*.json
+
+# Tracce delle campagne: alcuni megabyte per campagna, e ogni correzione
+# al banco le rende obsolete. Il microbenchmark resta versionato, perche'
+# e' l'unica misura dell'esperimento A e non dipende dal modello.
+results/campagna*/

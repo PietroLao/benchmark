@@ -138,6 +138,18 @@ class Task:
     #: effetti collaterali: un agente che cancella l'iscrizione giusta e
     #: per errore anche un'altra supererebbe i due controlli precedenti.
     state_total: int | None = None
+    #: Vero quando lo stato atteso al termine **coincide con quello
+    #: iniziale**. Vale per il solo ``t4``, dove l'operazione richiesta
+    #: deve fallire e nulla deve cambiare.
+    #:
+    #: In quel caso ``verify_state`` non discrimina: restituisce vero sia
+    #: se l'agente ha riferito correttamente il fallimento, sia se ha
+    #: dichiarato un successo che non c'e' stato. Il controllo sul testo
+    #: resta quindi l'unico giudice, e chi confronta i due giudizi deve
+    #: saperlo — altrimenti segnala come difetto del criterio una
+    #: allucinazione del modello, che e' esattamente cio' che ``t4`` esiste
+    #: per osservare.
+    state_invariato: bool = False
 
     def check(self, answer: str) -> bool:
         """Verifica la risposta finale.
@@ -219,7 +231,22 @@ TASKS: tuple[Task, ...] = (
             "elementare in cui un ciclo agentico serve davvero."
         ),
         expected="iscrizione di pgreco all'evento 1",
-        must_contain=(("iscri",),),
+        # ``registrat`` va accettato quanto ``iscri``: lo strumento si
+        # chiama ``register_user_to_event`` e in italiano "registrare
+        # qualcuno a un evento" e' equivalente a "iscriverlo". ``t4``,
+        # ``t6`` e ``t7`` lo elencavano gia'; qui mancava per omissione, e
+        # la verifica stava accettando per caso una sola delle due scelte
+        # lessicali. Misurato: dieci esecuzioni su dieci con
+        # ``verify_state`` positivo venivano bocciate sul testo perche' il
+        # modello aveva scritto "registrato" anziche' "iscritto".
+        # Le radici sono tagliate prima del suffisso che distingue il
+        # participio dal sostantivo: il modello riferisce l'azione ora con
+        # "ha iscritto", ora con "l'iscrizione e' avvenuta", e le due
+        # forme sono egualmente corrette. Tagliando a "registrat" si
+        # accettava "registrato" e si bocciava "registrazione" — accaduto
+        # su ``t7``, quattro esecuzioni su cinque, con lo stato del
+        # servizio corretto in tutte e quattro.
+        must_contain=(("iscri", "registra"),),
         min_tool_calls=2,
         mutates_state=True,
         state_present=(("pgreco", 1),),
@@ -273,6 +300,7 @@ TASKS: tuple[Task, ...] = (
         mutates_state=True,
         state_present=(("lferrari", 3),),
         state_total=11,
+        state_invariato=True,
     ),
     Task(
         task_id="t5_cancellazione_multipla",
@@ -318,7 +346,7 @@ TASKS: tuple[Task, ...] = (
             "conteggi."
         ),
         expected="lferrari iscritta agli eventi 4 e 5",
-        must_contain=(("iscritt", "aggiunt", "registrat"),),
+        must_contain=(("iscri", "aggiunt", "registra"),),
         min_tool_calls=4,
         mutates_state=True,
         state_present=(("lferrari", 4), ("lferrari", 5)),
@@ -349,7 +377,7 @@ TASKS: tuple[Task, ...] = (
             "esercitare ``create_event``."
         ),
         expected="evento 9 creato, aconti iscritto",
-        must_contain=(("creat",), ("iscritt", "registrat", "aggiunt")),
+        must_contain=(("creat",), ("iscri", "registra", "aggiunt")),
         min_tool_calls=2,
         mutates_state=True,
         state_present=(("aconti", 9),),

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import sys
 import time
@@ -52,6 +53,84 @@ RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
 #: I due bracci, ciascuno nella forma idiomatica del proprio ecosistema.
 ARMS = ("mcp", "langchain")
+
+#: Esiti che non vanno riutilizzati riprendendo: l'esecuzione non ha
+#: prodotto una misura e va rifatta. ``limite_iterazioni`` **non** e' fra
+#: questi: e' un fallimento del modello, cioe' un risultato.
+NON_RIUTILIZZABILI = {"errore_llm", "errore_agente"}
+
+#: File il cui contenuto determina *cosa* viene misurato. Un'esecuzione
+#: prodotta da una versione diversa di questi file non e' confrontabile
+#: con una prodotta da quella corrente, e riprendendo non va riutilizzata.
+_SORGENTI_MISURA = (
+    "shared/tasks.py",
+    "shared/operations.py",
+    "shared/nim.py",
+    "arm_mcp/host.py",
+    "arm_mcp/server.py",
+    "arm_langchain/agent.py",
+    "arm_langchain/tools.py",
+    "arm_langchain/wire.py",
+    "harness/trace.py",
+    "harness/campaign.py",
+)
+
+
+def impronta_codice() -> str:
+    """Riassume in dodici caratteri la versione del banco di prova.
+
+    Serve al meccanismo di ripresa. Senza, riprendere una campagna
+    riutilizza qualunque file gia' presente nella cartella, **anche se
+    prodotto da una versione precedente del codice**: e' accaduto
+    davvero, e ha reso inutilizzabile la prima ripetizione di una
+    campagna a cinque, perche' tredici esecuzioni del giorno prima sono
+    state saltate in silenzio e finite nella stessa tabella di quelle
+    nuove.
+
+    Non e' un controllo crittografico: e' un modo per accorgersi che il
+    codice e' cambiato. Che sia cambiato in modo rilevante non lo si puo'
+    stabilire meccanicamente, quindi qualunque differenza vale come tale.
+    """
+    radice = Path(__file__).resolve().parent.parent
+    digest = hashlib.sha256()
+    for relativo in _SORGENTI_MISURA:
+        percorso = radice / relativo
+        digest.update(relativo.encode())
+        digest.update(percorso.read_bytes() if percorso.exists() else b"<assente>")
+    return digest.hexdigest()[:12]
+
+
+def impronta_schemi(trace: RunTrace) -> tuple[str | None, int | None]:
+    """Riassume gli schemi che il braccio ha davvero pubblicato al modello.
+
+    L'impronta del codice non basta, e la ragione e' strutturale: il
+    braccio MCP non deriva gli schemi dal sorgente che sta qui, li chiede
+    a un **processo separato e di lunga durata**. Se quel server e' stato
+    avviato prima di una modifica a ``shared/operations.py``, continua a
+    servire i vecchi, e l'impronta del codice — calcolata sui file —
+    resta perfettamente coerente mentre la misura non lo e' piu'.
+
+    E' accaduto per una campagna intera: il braccio MCP pubblicava per
+    ``create_event`` una descrizione di 21 caratteri ("Crea un nuovo
+    evento.") mentre LangChain ne pubblicava 270, comprensive del formato
+    ISO 8601 della data. I due bracci hanno quindi ricevuto descrizioni
+    diverse dello stesso strumento, con l'asimmetria a favore di
+    LangChain proprio su ``t7_creazione``, l'unico compito che richieda
+    di sintetizzare una data nel formato dichiarato. Nessun controllo
+    esistente se ne e' accorto.
+
+    Registrando l'impronta in ogni traccia la cosa diventa **verificabile
+    a posteriori dai soli file**: uno scarto fra i bracci, o una deriva a
+    meta' campagna, si vedono rileggendo le tracce, senza dover ricordare
+    quando un server era stato avviato.
+    """
+    if not trace.llm_calls:
+        return None, None
+    tools = (trace.llm_calls[0].get("request") or {}).get("tools") or []
+    if not tools:
+        return None, None
+    testo = json.dumps(tools, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(testo.encode()).hexdigest()[:12], len(testo)
 
 
 def _reset_state() -> None:
@@ -88,6 +167,8 @@ async def run_one(arm: str, task: Task, model: str, repetition: int) -> RunTrace
     counts = _read_counter()
     trace.rest_counts = counts
     trace.config["repetition"] = repetition
+    trace.config["schema_hash"], trace.config["schema_chars"] = impronta_schemi(trace)
+    trace.config["code_fingerprint"] = impronta_codice()
 
     # La verifica sullo stato e' piu' solida di quella sul testo, perche'
     # non dipende da come il modello ha formulato la risposta.
@@ -103,18 +184,64 @@ async def run_one(arm: str, task: Task, model: str, repetition: int) -> RunTrace
     return trace
 
 
-def _already_done(directory: Path) -> set[tuple[str, str, str, int]]:
-    """Chiavi delle esecuzioni gia' presenti, per poter riprendere."""
-    done: set[tuple[str, str, str, int]] = set()
-    for path in directory.glob("*.json"):
+Chiave = tuple[str, str, str, int]
+
+
+def _esistenti(directory: Path) -> dict[Chiave, list[tuple[Path, dict[str, Any]]]]:
+    """Indicizza per chiave le tracce gia' presenti nella cartella."""
+    per_chiave: dict[Chiave, list[tuple[Path, dict[str, Any]]]] = {}
+    for path in sorted(directory.glob("*.json")):
         try:
             d = json.loads(path.read_text())
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             continue
         rep = (d.get("config") or {}).get("repetition")
-        if rep is not None and d.get("status") not in {"errore_llm", "errore_agente"}:
-            done.add((d["arm"], d["model"], d["task_id"], rep))
-    return done
+        if rep is None:
+            continue
+        chiave = (d["arm"], d["model"], d["task_id"], rep)
+        per_chiave.setdefault(chiave, []).append((path, d))
+    return per_chiave
+
+
+def _riutilizzabili(
+    esistenti: dict[Chiave, list[tuple[Path, dict[str, Any]]]], impronta: str
+) -> tuple[set[Chiave], set[Chiave]]:
+    """Divide le esecuzioni presenti fra riutilizzabili e da rifare.
+
+    Restituisce ``(da_saltare, obsolete)``: le seconde sono esecuzioni
+    riuscite ma prodotte da un'altra versione del codice, che vanno
+    rifatte e vanno **segnalate**, perche' il modo in cui questo problema
+    si e' manifestato la prima volta e' stato il silenzio.
+    """
+    saltare: set[Chiave] = set()
+    obsolete: set[Chiave] = set()
+    for chiave, voci in esistenti.items():
+        for _, d in voci:
+            if d.get("status") in NON_RIUTILIZZABILI:
+                continue
+            if (d.get("config") or {}).get("code_fingerprint") != impronta:
+                obsolete.add(chiave)
+                continue
+            saltare.add(chiave)
+            break
+    return saltare, obsolete - saltare
+
+
+def _rimuovi_superate(
+    esistenti: dict[Chiave, list[tuple[Path, dict[str, Any]]]], chiave: Chiave
+) -> int:
+    """Cancella le tracce che l'esecuzione in corso sostituisce.
+
+    Senza, riprendendo si accumulano piu' file per la stessa cella e il
+    riepilogo li conta tutti. Osservato: una campagna a settanta
+    esecuzioni ne dichiarava settantuno presenti, e un compito compariva
+    con sei valori invece di cinque, perche' il tentativo fallito era
+    rimasto accanto alla sua ripetizione.
+    """
+    voci = esistenti.pop(chiave, [])
+    for path, _ in voci:
+        path.unlink(missing_ok=True)
+    return len(voci)
 
 
 def build_plan(
@@ -166,16 +293,25 @@ async def main() -> int:
         print("Avviare prima:  uv run uvicorn server.wrapper:app --port 8000")
         return 1
 
+    impronta = impronta_codice()
     plan = build_plan(models, tasks, parsed.repetitions)
-    done = _already_done(directory)
-    todo = [p for p in plan if (p[0], p[2], p[1].task_id, p[3]) not in done]
+    esistenti = _esistenti(directory)
+    saltare, obsolete = _riutilizzabili(esistenti, impronta)
+    todo = [p for p in plan if (p[0], p[2], p[1].task_id, p[3]) not in saltare]
 
     print(
         f"Campagna: {len(models)} modelli x {len(tasks)} compiti x "
         f"{parsed.repetitions} ripetizioni x {len(ARMS)} bracci = {len(plan)} esecuzioni"
     )
-    if done:
+    print(f"Versione del banco di prova: {impronta}")
+    if saltare:
         print(f"Gia' presenti in {directory.name}: {len(plan) - len(todo)}, saltate.")
+    if obsolete:
+        print(
+            f"  ! {len(obsolete)} esecuzioni presenti sono state prodotte da "
+            "un'altra versione del codice:\n"
+            "    verranno rifatte, e le vecchie tracce rimosse."
+        )
     print()
 
     started = time.perf_counter()
@@ -187,7 +323,10 @@ async def main() -> int:
             print(f"{label}  ECCEZIONE {type(exc).__name__}: {exc}")
             continue
 
+        rimosse = _rimuovi_superate(esistenti, (arm, model, task.task_id, rep))
         path = trace.save(directory)
+        if rimosse:
+            print(f"{' ' * len(label)}  ({rimosse} traccia superata rimossa)")
         m = trace.metrics()
         print(
             f"{label}  {trace.status:<20} "
